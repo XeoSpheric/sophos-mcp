@@ -7,36 +7,47 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SophosClient } from "../dist/client/sophos-client.js";
-import { registerMobileTools } from "../dist/tools/mobile.js";
+import { SophosClient } from "../src/client/sophos-client.ts";
+import type { TenantResolver } from "../src/client/tenant-resolver.ts";
+import { registerMobileTools } from "../src/tools/mobile.ts";
+import { connect } from "./harness.ts";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const HOST = "https://api-au01.central.sophos.com";
 
-function harness() {
-  const calls = [];
-  let tokens = 0;
-  const tokenManager = { getToken: async () => (tokens++, "fake-token") };
-  const tenantResolver = {
+interface Call {
+  url: string;
+  method: string | undefined;
+}
+
+/** The slice of TenantResolver the client and the mobile tools touch. */
+function stubResolver(): TenantResolver {
+  return {
     resolveApiHost: async () => HOST,
-    resolveTenantId: (id) => id ?? TENANT,
+    resolveTenantId: (id?: string) => id ?? TENANT,
     getIdentity: () => ({ id: TENANT, idType: "tenant", apiHosts: { global: "https://api.central.sophos.com" } }),
     getIdHeader: () => ({ name: "X-Tenant-ID", value: TENANT }),
-  };
+  } as unknown as TenantResolver;
+}
+
+function harness() {
+  const calls: Call[] = [];
+  let tokens = 0;
+  const tokenManager = { getToken: async () => (tokens++, "fake-token") };
+  const tenantResolver = stubResolver();
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     calls.push({ url: String(url), method: init?.method });
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
+  }) as typeof fetch;
   return {
     client: new SophosClient(tokenManager, tenantResolver),
     tenantResolver,
     calls,
     tokens: () => tokens,
-    restore: () => (globalThis.fetch = realFetch),
+    restore: () => {
+      globalThis.fetch = realFetch;
+    },
   };
 }
 
@@ -111,44 +122,46 @@ test("the IDs Sophos uses still go through unchanged", async () => {
 test("the refusal reaches the model as a tool error and nothing is deleted", async () => {
   const h = harness();
   try {
-    const server = new McpServer({ name: "test", version: "0.0.0" });
-    registerMobileTools(server, h.client, h.tenantResolver);
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await server.connect(serverTransport);
-    const client = new Client({ name: "test-client", version: "0.0.0" });
-    await client.connect(clientTransport);
+    const client = connect((server) => registerMobileTools(server, h.client, h.tenantResolver));
 
     const result = await client.callTool({
       name: "sophos_delete_mobile_device",
       arguments: { device_id: "../../../endpoint/v1/endpoints/659240aa-797e-42cf-bb82-cca43c4e80d8" },
     });
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /Refused request path/);
+    assert.match(result.content[0]!.text, /Refused request path/);
     assert.equal(h.calls.length, 0);
-
-    await client.close();
-    await server.close();
   } finally {
     h.restore();
   }
 });
 
+/** Backoff does not wait (sleep is private, so reach it through a cast). */
+function noWait(client: SophosClient): void {
+  (client as any).sleep = async () => {};
+}
+
 /** A SophosClient whose fetch answers `status` and whose backoff does not wait. */
-function retryHarness(status, { headers = {} } = {}) {
-  const calls = [];
+function retryHarness(status: number | ((n: number) => number), { headers = {} }: { headers?: Record<string, string> } = {}) {
+  const calls: Call[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     calls.push({ url: String(url), method: init?.method ?? "GET" });
     const s = typeof status === "function" ? status(calls.length) : status;
     return new Response(JSON.stringify(s === 200 ? { ok: true } : { error: "internalServerError", message: "Error processing data" }), {
       status: s,
       headers: { "Content-Type": "application/json", ...headers },
     });
+  }) as typeof fetch;
+  const client = new SophosClient({ getToken: async () => "fake-token" }, stubResolver());
+  noWait(client);
+  return {
+    client,
+    calls,
+    restore: () => {
+      globalThis.fetch = realFetch;
+    },
   };
-  const tenantResolver = { resolveApiHost: async () => HOST, resolveTenantId: (id) => id ?? TENANT };
-  const client = new SophosClient({ getToken: async () => "fake-token" }, tenantResolver);
-  client.sleep = async () => {};
-  return { client, calls, restore: () => (globalThis.fetch = realFetch) };
 }
 
 test("a POST that gets a 5xx is not retried and says why", async () => {
@@ -165,15 +178,15 @@ test("a POST that gets a 5xx is not retried and says why", async () => {
 });
 
 test("a POST whose connection fails is not retried", async () => {
-  const calls = [];
+  const calls: number[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => {
+  globalThis.fetch = (async () => {
     calls.push(1);
     throw new TypeError("fetch failed");
-  };
+  }) as typeof fetch;
   try {
-    const client = new SophosClient({ getToken: async () => "t" }, { resolveApiHost: async () => HOST, resolveTenantId: (id) => id });
-    client.sleep = async () => {};
+    const client = new SophosClient({ getToken: async () => "t" }, stubResolver());
+    noWait(client);
     await assert.rejects(() => client.tenantRequest(TENANT, "/endpoint/v1/policies", { method: "POST", body: {} }), /fetch failed\. Not retried/);
     assert.equal(calls.length, 1);
   } finally {
@@ -189,7 +202,7 @@ test("a POST is still retried after a 429, and GET, PATCH and DELETE still retry
   } finally {
     limited.restore();
   }
-  for (const method of ["GET", "PATCH", "DELETE"]) {
+  for (const method of ["GET", "PATCH", "DELETE"] as const) {
     const h = retryHarness((n) => (n < 3 ? 503 : 200));
     try {
       await h.client.tenantRequest(TENANT, "/endpoint/v1/policies/x", { method, ...(method === "PATCH" ? { body: {} } : {}) });

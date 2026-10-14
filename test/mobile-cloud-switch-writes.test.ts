@@ -9,13 +9,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SophosClient } from "../dist/client/sophos-client.js";
-import { registerMobileTools } from "../dist/tools/mobile.js";
-import { registerCloudSecurityTools } from "../dist/tools/cloud-security.js";
-import { registerSwitchTools } from "../dist/tools/switch.js";
+import { SophosClient } from "../src/client/sophos-client.ts";
+import { registerMobileTools } from "../src/tools/mobile.ts";
+import { registerCloudSecurityTools } from "../src/tools/cloud-security.ts";
+import { registerSwitchTools } from "../src/tools/switch.ts";
+import { connect, text as resultText } from "./harness.ts";
+import type { ToolRegistry } from "../src/tools/registry.ts";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const HOST = "https://api-au01.central.sophos.com";
@@ -28,7 +27,7 @@ const POLICY2 = "00000000-0000-4000-8000-0000000000d2";
 const APPS = "00000000-0000-4000-8000-0000000000e1";
 const PROFILE = "00000000-0000-4000-8000-0000000000f1";
 
-const STORED = {
+const STORED: Record<string, any> = {
   [`/mobile/v1/devices/${DEVICE}`]: {
     id: DEVICE,
     name: "ZZ phone",
@@ -59,36 +58,31 @@ const STORED = {
   [`/cloud-security/v1/profiles/${PROFILE}`]: { id: PROFILE, name: "ZZ renamed" },
 };
 
-async function harness(register) {
-  const calls = [];
+type Register = (server: ToolRegistry, client: SophosClient, tenantResolver: any) => void;
+
+async function harness(register: Register) {
+  const calls: { method: string; path: string; params: Record<string, string>; body: any }[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: any, init?: any) => {
     const u = new URL(String(url));
     const method = init?.method ?? "GET";
     calls.push({ method, path: u.pathname, params: Object.fromEntries(u.searchParams), body: init?.body === undefined ? undefined : JSON.parse(init.body) });
     if (method === "GET") return new Response(JSON.stringify(STORED[u.pathname] ?? {}), { status: 200 });
     if (method === "DELETE") return new Response(JSON.stringify({ skippedProfiles: [] }), { status: 200 });
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
-  };
-  const tenantResolver = { resolveApiHost: async () => HOST, resolveTenantId: (id) => id ?? TENANT };
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  register(server, new SophosClient({ getToken: async () => "fake-token" }, tenantResolver), tenantResolver);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
+  }) as typeof fetch;
+  const tenantResolver: any = { resolveApiHost: async () => HOST, resolveTenantId: (id?: string) => id ?? TENANT };
+  const mcp = connect((server) => register(server, new SophosClient({ getToken: async () => "fake-token" }, tenantResolver), tenantResolver));
   return {
     calls,
     mcp,
     writes: () => calls.filter((c) => c.method !== "GET"),
-    async call(name, args) {
+    async call(name: string, args: Record<string, unknown>) {
       const result = await mcp.callTool({ name, arguments: args });
-      const text = result.content.map((c) => c.text ?? "").join("\n");
-      return { isError: Boolean(result.isError), text, json: result.isError ? null : JSON.parse(text) };
+      const text = resultText(result);
+      return { isError: Boolean(result.isError), text, json: (result.isError ? null : JSON.parse(text)) as any };
     },
     async close() {
-      await mcp.close();
-      await server.close();
       globalThis.fetch = realFetch;
     },
   };
@@ -219,12 +213,12 @@ test("every tool that replaces state with a PUT or replaces a list is marked des
     mobile: ["sophos_update_mobile_device", "sophos_update_mobile_device_group", "sophos_update_mobile_app_group", "sophos_update_mobile_auto_enrollment"],
     switch: ["sophos_update_switch_mac_filtering"],
   };
-  for (const [register, names] of [[registerMobileTools, destructive.mobile], [registerSwitchTools, destructive.switch]]) {
+  for (const [register, names] of [[registerMobileTools, destructive.mobile], [registerSwitchTools, destructive.switch]] as [Register, string[]][]) {
     const h = await harness(register);
     try {
       const { tools } = await h.mcp.listTools();
       for (const name of names) {
-        assert.equal(tools.find((t) => t.name === name).annotations.destructiveHint, true, name);
+        assert.equal(tools.find((t: any) => t.name === name)!.annotations.destructiveHint, true, name);
       }
     } finally {
       await h.close();
@@ -233,7 +227,7 @@ test("every tool that replaces state with a PUT or replaces a list is marked des
   const h = await harness(registerCloudSecurityTools);
   try {
     const { tools } = await h.mcp.listTools();
-    const rename = tools.find((t) => t.name === "sophos_update_cloud_security_profile");
+    const rename = tools.find((t: any) => t.name === "sophos_update_cloud_security_profile")!;
     assert.equal(rename.annotations.destructiveHint, false, "a rename replaces nothing else");
     assert.match(rename.description, /changes only the name/);
   } finally {

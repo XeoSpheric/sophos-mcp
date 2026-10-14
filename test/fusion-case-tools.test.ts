@@ -6,17 +6,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { registerFusionCaseTools } from "../dist/tools/fusion-cases.js";
+import { registerFusionCaseTools } from "../src/tools/fusion-cases.ts";
+import { connect, json as parseJson, text as resultText } from "./harness.ts";
 
 const CASE_ID = "659240aa-797e-42cf-bb82-cca43c4e80d8";
 const OPEN = { id: "28a4f2df-dd5f-44b5-8316-da1f6cfbd254", name: "in_progress", title: "In Progress", isClosed: false };
 const CLOSED = { id: "5e2b9d40-1111-4111-8111-111111111111", name: "closed", title: "Closed", isClosed: true };
 const VERDICT = { id: "6d7e8f9a-0b1c-2d3e-4f5a-6b7c8d9e0f1a", name: "false_positive", title: "False Positive" };
 
-function caseRecord(overrides = {}) {
+function caseRecord(overrides: Record<string, any> = {}) {
   return {
     id: CASE_ID,
     shortId: "CSE00009",
@@ -58,12 +56,12 @@ function caseRecord(overrides = {}) {
 }
 
 /** A Fusion client that serves one case and records every mutation sent. */
-function fakeClient(current) {
-  const sent = [];
+function fakeClient(current: any) {
+  const sent: any[] = [];
   let state = current;
   return {
     sent,
-    query: async (_tenantId, document, variables) => {
+    query: async (_tenantId: string, document: string, variables: any) => {
       if (document.startsWith("query FusionGetCase(")) return { data: { case: state }, warnings: [] };
       if (document.startsWith("mutation FusionUpdateCase(")) {
         sent.push(variables.input);
@@ -86,29 +84,22 @@ function fakeClient(current) {
   };
 }
 
-const referenceData = {
+const referenceData: any = {
   get: async () => ({ types: [], primaryStatuses: [OPEN, CLOSED], primaryVerdicts: [VERDICT], fetchedAt: "" }),
-  resolveTypeId: async (_t, v) => v,
-  resolveStatusId: async (_t, v) => (v === "closed" ? CLOSED.id : OPEN.id),
-  resolveStatus: async (_t, v) => (v === "closed" ? CLOSED : OPEN),
+  resolveTypeId: async (_t: string, v: string) => v,
+  resolveStatusId: async (_t: string, v: string) => (v === "closed" ? CLOSED.id : OPEN.id),
+  resolveStatus: async (_t: string, v: string) => (v === "closed" ? CLOSED : OPEN),
   resolveVerdictId: async () => VERDICT.id,
 };
 
-const tenantResolver = { resolveTenantId: (id) => id ?? "11111111-2222-3333-4444-555555555555" };
+const tenantResolver: any = { resolveTenantId: (id?: string) => id ?? "11111111-2222-3333-4444-555555555555" };
 
-async function updateCase(current, args) {
+async function updateCase(current: any, args: Record<string, unknown>, reference: any = referenceData) {
   const client = fakeClient(current);
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerFusionCaseTools(server, client, tenantResolver, referenceData);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
+  const mcp = connect((server) => registerFusionCaseTools(server, client as any, tenantResolver, reference));
   const result = await mcp.callTool({ name: "sophos_fusion_update_case", arguments: { case_id: CASE_ID, ...args } });
-  await mcp.close();
-  await server.close();
-  const text = result.content.map((c) => c.text ?? "").join("\n");
-  return { isError: Boolean(result.isError), text, json: result.isError ? null : JSON.parse(text), sent: client.sent };
+  const text = resultText(result);
+  return { isError: Boolean(result.isError), text, json: result.isError ? null : parseJson(result), sent: client.sent };
 }
 
 test("a title change on a closed case is refused before any write, with the reopen hint", async () => {
@@ -177,19 +168,10 @@ test("a return to new is refused once the case has left it", async () => {
     ...referenceData,
     resolveStatus: async () => ({ id: "n", name: "new", title: "New", isClosed: false }),
   };
-  const client = fakeClient(caseRecord());
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerFusionCaseTools(server, client, tenantResolver, referenceWithNew);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
-  const result = await mcp.callTool({ name: "sophos_fusion_update_case", arguments: { case_id: CASE_ID, status: "new" } });
-  await mcp.close();
-  await server.close();
-  assert.equal(Boolean(result.isError), true);
-  assert.match(result.content[0].text, /cannot move a case back to new/);
-  assert.equal(client.sent.length, 0);
+  const { isError, text, sent } = await updateCase(caseRecord(), { status: "new" }, referenceWithNew);
+  assert.equal(isError, true);
+  assert.match(text, /cannot move a case back to new/);
+  assert.equal(sent.length, 0);
 });
 
 test("tags are merged with the current list unless replace_tags is set", async () => {

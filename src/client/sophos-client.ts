@@ -3,9 +3,10 @@
  * Handles region-aware routing, auth headers, retries, and error mapping.
  */
 
-import type { TokenManager } from "../auth/token-manager.js";
-import type { TenantResolver } from "./tenant-resolver.js";
-import type { SophosApiError } from "../types/sophos.js";
+import type { TokenManager } from "../auth/token-manager.ts";
+import { log } from "../log.ts";
+import type { TenantResolver } from "./tenant-resolver.ts";
+import type { SophosApiError } from "../types/sophos.ts";
 
 export interface RequestOptions {
   /** HTTP method */
@@ -54,10 +55,13 @@ export function assertSafeApiPath(path: string): void {
 }
 
 export class SophosClient {
-  constructor(
-    private tokenManager: TokenManager,
-    private tenantResolver: TenantResolver
-  ) {}
+  private tokenManager: Pick<TokenManager, "getToken">;
+  private tenantResolver: TenantResolver;
+
+  constructor(tokenManager: Pick<TokenManager, "getToken">, tenantResolver: TenantResolver) {
+    this.tokenManager = tokenManager;
+    this.tenantResolver = tenantResolver;
+  }
 
   /**
    * Make a request to a tenant-scoped API endpoint.
@@ -172,8 +176,8 @@ export class SophosClient {
           // Rate limited: wait and retry
           const retryAfter = response.headers.get("Retry-After");
           const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000;
-          console.error(
-            `[sophos-client] Rate limited, waiting ${waitMs}ms (attempt ${attempt + 1})`
+          log.warn(
+            `Rate limited, waiting ${waitMs}ms (attempt ${attempt + 1})`
           );
           await this.sleep(waitMs);
           continue;
@@ -221,8 +225,8 @@ export class SophosClient {
 
         if (attempt < retries) {
           const backoff = Math.pow(2, attempt) * 1000;
-          console.error(
-            `[sophos-client] Request failed, retrying in ${backoff}ms: ${lastError.message}`
+          log.warn(
+            `Request failed, retrying in ${backoff}ms: ${lastError.message}`
           );
           await this.sleep(backoff);
         }

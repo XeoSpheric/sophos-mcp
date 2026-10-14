@@ -1,16 +1,21 @@
 /**
  * Discovers the caller's identity type via /whoami/v1 and resolves
  * tenant IDs to their regional API hosts. Caches the mapping.
+ *
+ * The identity and tenant map live in a TenancyStore, plain data shared by
+ * every request in the isolate that uses the same credentials. A
+ * TenantResolver is per request and holds no promise another request awaits.
  */
 
-import { SOPHOS_GLOBAL_API } from "../config/config.js";
-import type { TokenManager } from "../auth/token-manager.js";
+import { SOPHOS_GLOBAL_API } from "../config/config.ts";
+import { log } from "../log.ts";
+import type { TokenManager } from "../auth/token-manager.ts";
 import type {
   SophosIdType,
   SophosWhoamiResponse,
   SophosTenant,
   SophosTenantPage,
-} from "../types/sophos.js";
+} from "../types/sophos.ts";
 
 export interface TenantInfo {
   id: string;
@@ -29,18 +34,46 @@ export interface CallerIdentity {
   };
 }
 
-export class TenantResolver {
-  private identity: CallerIdentity | null = null;
-  private tenantCache = new Map<string, TenantInfo>();
-  private tenantsLoaded = false;
+export interface TenancyStore {
+  identity: CallerIdentity | null;
+  tenants: Map<string, TenantInfo>;
+  /** Date.now() of the last complete tenant list load; 0 when never loaded. */
+  tenantsLoadedAt: number;
+}
 
-  constructor(private tokenManager: TokenManager) {}
+export function newTenancyStore(): TenancyStore {
+  return { identity: null, tenants: new Map(), tenantsLoadedAt: 0 };
+}
+
+/** A partner or organization tenant list is reloaded after this long. */
+const TENANT_LIST_TTL_MS = 15 * 60_000;
+
+export class TenantResolver {
+  readonly #tokenManager: TokenManager;
+  readonly #store: TenancyStore;
+
+  constructor(tokenManager: TokenManager, store: TenancyStore = newTenancyStore()) {
+    this.#tokenManager = tokenManager;
+    this.#store = store;
+  }
+
+  private get tenantCache(): Map<string, TenantInfo> {
+    return this.#store.tenants;
+  }
+
+  private get tenantsLoaded(): boolean {
+    const identity = this.#store.identity;
+    if (identity?.idType === "tenant") return this.#store.tenantsLoadedAt > 0;
+    return this.#store.tenantsLoadedAt > 0 && Date.now() - this.#store.tenantsLoadedAt < TENANT_LIST_TTL_MS;
+  }
 
   /**
-   * Initialise: calls /whoami/v1 and discovers the caller identity.
+   * Initialise: calls /whoami/v1 and discovers the caller identity. The
+   * identity never changes for a credential, so it is fetched once per isolate.
    */
   async init(): Promise<CallerIdentity> {
-    const token = await this.tokenManager.getToken();
+    if (this.#store.identity) return this.#store.identity;
+    const token = await this.#tokenManager.getToken();
     const response = await fetch(`${SOPHOS_GLOBAL_API}/whoami/v1`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -51,15 +84,13 @@ export class TenantResolver {
     }
 
     const data = (await response.json()) as SophosWhoamiResponse;
-    this.identity = {
+    const identity: CallerIdentity = {
       id: data.id,
       idType: data.idType,
       apiHosts: data.apiHosts,
     };
 
-    console.error(
-      `[sophos-tenant] Identity: ${data.idType} (${data.id})`
-    );
+    log.info(`Sophos identity: ${data.idType} (${data.id})`);
 
     // For tenant-level callers, the data region host is returned directly
     if (data.idType === "tenant" && data.apiHosts.dataRegion) {
@@ -70,17 +101,26 @@ export class TenantResolver {
         dataRegion: "self",
         dataGeography: "unknown",
       });
-      this.tenantsLoaded = true;
+      this.#store.tenantsLoadedAt = Date.now();
     }
 
-    return this.identity;
+    this.#store.identity = identity;
+    return identity;
   }
 
   getIdentity(): CallerIdentity {
-    if (!this.identity) {
+    if (!this.#store.identity) {
       throw new Error("TenantResolver not initialised. Call init() first.");
     }
-    return this.identity;
+    return this.#store.identity;
+  }
+
+  /**
+   * True for partner/organization callers, and while the identity is unknown
+   * (no credentials, or whoami failed), so every tool is listed.
+   */
+  isMultiTenant(): boolean {
+    return this.#store.identity?.idType !== "tenant";
   }
 
   /**
@@ -121,8 +161,9 @@ export class TenantResolver {
     let page = 1;
     let totalPages = 1;
 
+    const loaded = new Map<string, TenantInfo>();
     while (page <= totalPages) {
-      const token = await this.tokenManager.getToken();
+      const token = await this.#tokenManager.getToken();
       const url = new URL(`${SOPHOS_GLOBAL_API}${apiPath}`);
       url.searchParams.set("page", String(page));
       if (page === 1) {
@@ -150,7 +191,7 @@ export class TenantResolver {
       }
 
       for (const tenant of data.items) {
-        this.tenantCache.set(tenant.id, {
+        loaded.set(tenant.id, {
           id: tenant.id,
           name: tenant.name,
           apiHost: tenant.apiHost,
@@ -162,11 +203,12 @@ export class TenantResolver {
       page++;
     }
 
-    this.tenantsLoaded = true;
-    console.error(
-      `[sophos-tenant] Loaded ${this.tenantCache.size} tenants`
-    );
-    return Array.from(this.tenantCache.values());
+    // Swap in the complete list at once, so a tenant removed since the last
+    // load stops resolving and a failed load leaves the old list in place.
+    this.#store.tenants = loaded;
+    this.#store.tenantsLoadedAt = Date.now();
+    log.info(`Loaded ${loaded.size} Sophos tenants`);
+    return Array.from(loaded.values());
   }
 
   /**
@@ -177,7 +219,7 @@ export class TenantResolver {
       return this.tenantCache.get(tenantId)!.apiHost;
     }
 
-    // Try loading tenants if we haven't yet
+    // Load (or reload a stale) tenant list
     if (!this.tenantsLoaded) {
       await this.loadTenants();
     }
@@ -213,7 +255,7 @@ export class TenantResolver {
   }
 
   /**
-   * Returns all cached tenants.
+   * Returns all cached tenants (possibly empty or stale; loadTenants() refreshes).
    */
   getCachedTenants(): TenantInfo[] {
     return Array.from(this.tenantCache.values());

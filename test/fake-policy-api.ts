@@ -12,11 +12,10 @@
  * Registers the policy tools on a real SophosClient. No network.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SophosClient } from "../dist/client/sophos-client.js";
-import { registerPolicyTools } from "../dist/tools/policies.js";
+import { SophosClient } from "../src/client/sophos-client.ts";
+import type { TenantResolver } from "../src/client/tenant-resolver.ts";
+import { registerPolicyTools } from "../src/tools/policies.ts";
+import { connect } from "./harness.ts";
 
 export const TENANT = "00000000-0000-4000-8000-000000000001";
 export const HOST = "https://api-au01.central.sophos.com";
@@ -41,10 +40,10 @@ const WP = "endpoint.web-control.";
 const USER_KEYS = ["users", "userGroups"];
 const DEVICE_KEYS = ["endpoints", "endpointGroups"];
 
-const reply = (status, body) =>
+const reply = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-function applyAppliesTo(type, appliesTo) {
+function applyAppliesTo(type: string, appliesTo: Record<string, any>): { error?: Response; value?: any } {
   const keys = Object.keys(appliesTo);
   const user = keys.some((k) => USER_KEYS.includes(k));
   const device = keys.some((k) => DEVICE_KEYS.includes(k));
@@ -68,7 +67,7 @@ function applyAppliesTo(type, appliesTo) {
 }
 
 /** Merges a settings write the way Sophos does for the web profile keys. */
-function applySettings(stored, write) {
+function applySettings(stored: Record<string, any>, write: Record<string, any>): { error?: Response; value?: any } {
   const next = { ...stored };
   for (const [key, value] of Object.entries(write)) {
     if (key !== `${WP}web-profile-id`) next[key] = value;
@@ -84,24 +83,37 @@ function applySettings(stored, write) {
   return { value: next };
 }
 
-export async function policyHarness({ tamper, failPatch = false } = {}) {
-  const endpoints = new Map([
+export interface PolicyCall {
+  method: string;
+  path: string;
+  params: Record<string, string>;
+  body: any;
+}
+
+export interface PolicyCallResult {
+  isError: boolean;
+  text: string;
+  json: any;
+}
+
+export async function policyHarness({ tamper, failPatch = false }: { tamper?: (policy: any) => any; failPatch?: boolean } = {}) {
+  const endpoints = new Map<string, any>([
     [E1, { id: E1, type: "computer", hostname: "victim" }],
     [ES1, { id: ES1, type: "server", hostname: "DC01" }],
     [EV1, { id: EV1, type: "securityVm", hostname: "svm" }],
   ]);
-  const groups = new Map([
+  const groups = new Map<string, any>([
     [G1, { id: G1, type: "computer", name: "ZZ computers" }],
     [G2, { id: G2, type: "server", name: "ZZ servers" }],
     [G3, { id: G3, type: "computer", name: "ZZ new computers" }],
   ]);
-  const unlisted = new Set([G3]);
+  const unlisted = new Set<string>([G3]);
   const webDefaults = () => ({
     [`${WP}web-profile.enabled`]: { value: true },
     [`${WP}filter-by-web-profile.enabled`]: { value: false },
     [`${WP}web-profile-id`]: { value: "" },
   });
-  const store = new Map([
+  const store = new Map<string, any>([
     [P_USER, { id: P_USER, name: "ZZ user", type: "web-control", enabled: false, priority: 3, appliesTo: { users: [U1], userGroups: [] }, settings: webDefaults() }],
     [P_DEVICE, { id: P_DEVICE, name: "ZZ device", type: "threat-protection", enabled: false, priority: 4, appliesTo: { endpoints: [E1], endpointGroups: [G1] }, settings: {} }],
     [P_SERVER, { id: P_SERVER, name: "ZZ server", type: "server-web-control", enabled: false, priority: 1, appliesTo: { endpoints: [], endpointGroups: [] }, settings: webDefaults() }],
@@ -110,12 +122,12 @@ export async function policyHarness({ tamper, failPatch = false } = {}) {
   ]);
   let nextId = 1;
   const newId = () => `00000000-0000-4000-8000-1${String(nextId++).padStart(11, "0")}`;
-  const calls = [];
+  const calls: PolicyCall[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: any, init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
     const method = init?.method ?? "GET";
-    const body = init?.body === undefined ? undefined : JSON.parse(init.body);
+    const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
     calls.push({ method, path: u.pathname, params: Object.fromEntries(u.searchParams), body });
     const parts = u.pathname.split("/").filter(Boolean); // endpoint, v1, <resource>, <id>, <action>
     const [, , resource, id, action] = parts;
@@ -169,29 +181,22 @@ export async function policyHarness({ tamper, failPatch = false } = {}) {
     }
     if (method === "GET") return reply(200, tamper ? tamper(structuredClone(policy)) : policy);
     return reply(405, { error: "methodNotAllowed" });
-  };
+  }) as typeof fetch;
 
   const tokenManager = { getToken: async () => "fake-token" };
-  const tenantResolver = { resolveApiHost: async () => HOST, resolveTenantId: (tid) => tid ?? TENANT };
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerPolicyTools(server, new SophosClient(tokenManager, tenantResolver), tenantResolver);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
+  const tenantResolver = { resolveApiHost: async () => HOST, resolveTenantId: (tid?: string) => tid ?? TENANT } as unknown as TenantResolver;
+  const mcp = connect((server) => registerPolicyTools(server, new SophosClient(tokenManager, tenantResolver), tenantResolver));
   return {
     calls,
     store,
     writes: () => calls.filter((c) => c.method !== "GET"),
     lookups: () => calls.filter((c) => c.method === "GET" && /endpoints|endpoint-groups/.test(c.path)),
-    async call(name, args) {
+    async call(name: string, args: Record<string, unknown>): Promise<PolicyCallResult> {
       const result = await mcp.callTool({ name, arguments: args });
-      const text = result.content.map((c) => c.text ?? "").join("\n");
+      const text = result.content.map((c) => c.text).join("\n");
       return { isError: Boolean(result.isError), text, json: result.isError ? null : JSON.parse(text) };
     },
     async close() {
-      await mcp.close();
-      await server.close();
       globalThis.fetch = realFetch;
     },
   };

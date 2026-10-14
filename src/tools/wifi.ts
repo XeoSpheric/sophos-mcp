@@ -8,11 +8,11 @@
  * routes, so add and delete read the list, change it, and PUT it back.
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SophosClient } from "../client/sophos-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import { jsonResult, withErrorHandling } from "./helpers.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { SophosClient } from "../client/sophos-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import { jsonResult, withErrorHandling } from "./helpers.ts";
 
 const PATH = "/wifi/v1/settings/mac-filtering";
 const MAX_ADDRESSES = 256;
@@ -38,7 +38,7 @@ const macSchema = z
 const macKey = (mac: string) => mac.toLowerCase().replace(/-/g, ":");
 
 export function registerWifiTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: SophosClient,
   tenantResolver: TenantResolver
 ): void {

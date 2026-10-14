@@ -1,59 +1,19 @@
 {
   "name": "sophos-central-mcp-server",
-  "version": "0.8.3",
-  "files": [
-    "dist",
-    "docs"
-  ],
-  "description": "MCP server for the Sophos Fusion (formerly Sophos Central) APIs - SOC monitoring, endpoint management, admin automation, XDR investigation, and Fusion GraphQL cases",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Aaronjacobs000/sophos-mcp.git"
-  },
-  "homepage": "https://github.com/Aaronjacobs000/sophos-mcp#readme",
-  "bugs": {
-    "url": "https://github.com/Aaronjacobs000/sophos-mcp/issues"
-  },
-  "type": "module",
-  "main": "dist/index.js",
-  "bin": {
-    "sophos-central-mcp": "dist/index.js",
-    "sophos-central-mcp-server": "dist/index.js"
-  },
-  "scripts": {
-    "build": "tsc",
-    "build:mcpb": "npm run build && node scripts/build-mcpb.mjs",
-    "start": "node dist/index.js",
-    "dev": "tsc --watch",
-    "prepublishOnly": "npm run build",
-    "test": "npm run build && node --test test/*.test.mjs"
-  },
-  "keywords": [
-    "mcp",
-    "sophos",
-    "sophos-central",
-    "sophos-fusion",
-    "model-context-protocol",
-    "soc",
-    "security",
-    "endpoint-management",
-    "xdr",
-    "graphql"
-  ],
+  "version": "0.9.0",
+  "description": "MCP server for the Sophos Fusion (formerly Sophos Central) APIs, running on Cloudflare Workers",
   "license": "MIT",
-  "engines": {
-    "node": ">=20.0.0"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "dotenv": "^16.5.0",
-    "express": "^5.1.0",
-    "zod": "^3.25.67"
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc-rs -p tsconfig.json",
+    "test": "node --import ./test/setup.ts --test 'test/**/*.test.ts'",
+    "build": "wrangler deploy --dry-run --outdir dist-dry-run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "@anthropic-ai/mcpb": "^2.1.2",
-    "@types/express": "^5.0.3",
-    "@types/node": "^22.15.32",
-    "typescript": "^5.8.3"
+    "tsc-rs": "0.7.0",
+    "wrangler": "4.151.0"
   }
 }

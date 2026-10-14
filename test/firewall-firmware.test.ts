@@ -8,11 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SophosClient } from "../dist/client/sophos-client.js";
-import { registerFirewallTools } from "../dist/tools/firewall.js";
+import { SophosClient } from "../src/client/sophos-client.ts";
+import { registerFirewallTools } from "../src/tools/firewall.ts";
+import { connect, text as resultText } from "./harness.ts";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const HOST = "https://api-au01.central.sophos.com";
@@ -24,10 +22,10 @@ const UPGRADE_PATH = "/firewall/v1/firewalls/actions/firmware-upgrade";
  * Registers the firewall tools on a real SophosClient. fetch records every
  * request and answers `reply`: a JSON body, or a function returning a Response.
  */
-async function harness(reply = {}) {
-  const calls = [];
+async function harness(reply: any = {}) {
+  const calls: { url: URL; method: string | undefined; body: any }[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: any, init?: any) => {
     calls.push({
       url: new URL(String(url)),
       method: init?.method,
@@ -35,26 +33,19 @@ async function harness(reply = {}) {
     });
     if (typeof reply === "function") return reply();
     return new Response(JSON.stringify(reply), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
+  }) as typeof fetch;
   const tokenManager = { getToken: async () => "fake-token" };
-  const tenantResolver = { resolveApiHost: async () => HOST, resolveTenantId: (id) => id ?? TENANT };
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerFirewallTools(server, new SophosClient(tokenManager, tenantResolver), tenantResolver);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
+  const tenantResolver: any = { resolveApiHost: async () => HOST, resolveTenantId: (id?: string) => id ?? TENANT };
+  const mcp = connect((server) => registerFirewallTools(server, new SophosClient(tokenManager, tenantResolver), tenantResolver));
   return {
     calls,
     mcp,
-    async call(name, args) {
+    async call(name: string, args: Record<string, unknown>) {
       const result = await mcp.callTool({ name, arguments: args });
-      const text = result.content.map((c) => c.text ?? "").join("\n");
-      return { isError: Boolean(result.isError), text, json: result.isError ? null : JSON.parse(text) };
+      const text = resultText(result);
+      return { isError: Boolean(result.isError), text, json: (result.isError ? null : JSON.parse(text)) as any };
     },
     async close() {
-      await mcp.close();
-      await server.close();
       globalThis.fetch = realFetch;
     },
   };
@@ -110,9 +101,9 @@ test("a time with no offset is refused by the registered schema and nothing is s
       firewalls: [{ id: FW1, upgrade_at: "2026-10-08T02:00:00" }],
     });
     assert.equal(isError, true);
-    // The SDK's input validation answers, not the handler ("Error: ...")
-    assert.match(text, /^MCP error -32602: Input validation error/);
-    assert.match(text, /"upgrade_at"/);
+    // Argument validation answers, not the handler
+    assert.match(text, /^Error: Invalid arguments for tool sophos_start_firmware_upgrade: /);
+    assert.match(text, /upgrade_at/);
     assert.match(text, /A time with no offset is ambiguous/);
     assert.equal(h.calls.length, 0, "no request was sent");
   } finally {
@@ -163,7 +154,7 @@ test("cancel reports cancelled when Sophos answers deleted: true", async () => {
 });
 
 test("cancel does not claim success on deleted: false or an empty 204", async () => {
-  const replies = [
+  const replies: [string, any, any][] = [
     ["deleted: false", { deleted: false }, { deleted: false }],
     ["empty 204", () => new Response(null, { status: 204 }), {}],
   ];
@@ -187,7 +178,7 @@ test("cancel still needs at least one firewall ID", async () => {
   try {
     const { isError, text } = await h.call("sophos_cancel_firmware_upgrade", { firewall_ids: [] });
     assert.equal(isError, true);
-    assert.match(text, /^MCP error -32602: Input validation error/);
+    assert.match(text, /^Error: Invalid arguments for tool sophos_cancel_firmware_upgrade: /);
     assert.equal(h.calls.length, 0, "no request was sent");
   } finally {
     await h.close();
@@ -216,7 +207,7 @@ test("the firmware descriptions explain UTC and the version list, with no dashes
   const h = await harness();
   try {
     const { tools } = await h.mcp.listTools();
-    const byName = new Map(tools.map((t) => [t.name, t]));
+    const byName = new Map<string, any>(tools.map((t: any) => [t.name, t]));
     const start = byName.get("sophos_start_firmware_upgrade");
     const item = start.inputSchema.properties.firewalls.items.properties;
     assert.equal(item.upgrade_at.type, "string");
@@ -226,7 +217,7 @@ test("the firmware descriptions explain UTC and the version list, with no dashes
     assert.match(item.upgrade_to_version.description, /sophos_check_firmware_upgrade's upgradeToVersion list/);
     assert.match(start.description, /A time with no offset is refused/);
     assert.doesNotMatch(JSON.stringify(start), /omit for latest/i);
-    assert.match(byName.get("sophos_check_firmware_upgrade").description, /sophos_start_firmware_upgrade/);
+    assert.match(byName.get("sophos_check_firmware_upgrade")!.description, /sophos_start_firmware_upgrade/);
     for (const name of ["sophos_check_firmware_upgrade", "sophos_start_firmware_upgrade", "sophos_cancel_firmware_upgrade"]) {
       assert.doesNotMatch(JSON.stringify(byName.get(name)), /[–—]/, `${name} has no en or em dash`);
     }

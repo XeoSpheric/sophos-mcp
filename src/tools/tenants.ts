@@ -3,13 +3,13 @@
  * Lists managed tenants for partner/organization callers.
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import { jsonResult, withErrorHandling } from "./helpers.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import { jsonResult, withErrorHandling } from "./helpers.ts";
 
 export function registerTenantTools(
-  server: McpServer,
+  server: ToolRegistry,
   tenantResolver: TenantResolver
 ): void {
   server.registerTool(

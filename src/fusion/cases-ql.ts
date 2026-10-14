@@ -5,7 +5,7 @@
  * search schema is flat and exposes only the `*Id` columns.
  */
 
-import { qlString } from "./format.js";
+import { qlString } from "./format.ts";
 
 export interface CasesQlFilters {
   /** Raw QL, used verbatim. May carry its own `| sort` pipe. */

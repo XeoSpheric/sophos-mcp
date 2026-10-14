@@ -3,9 +3,14 @@
  * Live smoke test for the Sophos Fusion GraphQL tools and the Classic REST
  * case tools. Read-only by default.
  *
- * Spawns the built server over stdio with the credentials from the
- * environment (or .env) and calls the tools through the MCP client, so what
- * runs here is exactly what an MCP host runs.
+ * Calls the tools over MCP Streamable HTTP on a running Worker, so what runs
+ * here is exactly what an MCP host runs. Point it at `npm run dev` (the
+ * default, http://localhost:8787/mcp, credentials from .dev.vars) or a
+ * deployed Worker:
+ *
+ *   MCP_URL=https://sophos-mcp.<account>.workers.dev/mcp MCP_AUTH_TOKEN=... node scripts/fusion-smoke.mjs
+ *
+ * The write modes need ALLOW_WRITES=true on the Worker.
  *
  * Modes:
  *   node scripts/fusion-smoke.mjs [tenant-id]                  read-only Fusion checks
@@ -43,24 +48,11 @@
  * detection ID from sophos_list_detections).
  *
  * Every write is listed in a ledger at the end. Exits non-zero if any check
- * fails. Run `npm run build` first.
+ * fails.
  */
 
-import "dotenv/config";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-
-const serverPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
-if (!existsSync(serverPath)) {
-  console.error("dist/index.js is missing; run npm run build first");
-  process.exit(1);
-}
-if (!process.env.SOPHOS_CLIENT_ID || !process.env.SOPHOS_CLIENT_SECRET) {
-  console.error("SOPHOS_CLIENT_ID and SOPHOS_CLIENT_SECRET must be set (or in .env)");
-  process.exit(1);
-}
+const mcpUrl = process.env.MCP_URL || "http://localhost:8787/mcp";
+const mcpToken = process.env.MCP_AUTH_TOKEN;
 
 const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith("--")));
 const tenantId = process.argv.slice(2).find((a) => !a.startsWith("--"));
@@ -68,14 +60,33 @@ const scope = tenantId ? { tenant_id: tenantId } : {};
 const writeFusion = flags.has("--write") || flags.has("--all");
 const writeClassic = flags.has("--write-classic") || flags.has("--all");
 
-const transport = new StdioClientTransport({
-  command: process.execPath,
-  args: [serverPath],
-  env: { ...process.env, TRANSPORT: "stdio" },
-  stderr: "inherit",
-});
-const client = new Client({ name: "fusion-smoke", version: "0.0.0" });
-await client.connect(transport);
+/** A minimal stateless MCP client: one JSON-RPC POST per call. */
+let rpcId = 0;
+async function rpc(method, params) {
+  const response = await fetch(mcpUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(mcpToken ? { Authorization: `Bearer ${mcpToken}` } : {}),
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body || body.error) {
+    throw new Error(`${method} failed (HTTP ${response.status}): ${JSON.stringify(body?.error ?? body)}`);
+  }
+  return body.result;
+}
+const client = {
+  callTool: (params) => rpc("tools/call", params),
+  close: async () => {},
+};
+const listed = await rpc("tools/list", {});
+if (writeFusion && !listed.tools.some((t) => t.name === "sophos_fusion_create_case")) {
+  console.error("The write tools are not listed: set ALLOW_WRITES=true on the Worker for --write / --all");
+  process.exit(1);
+}
 
 let failures = 0;
 const ledger = [];

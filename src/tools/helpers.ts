@@ -2,7 +2,7 @@
  * Shared utilities for tool implementations.
  */
 
-import { CHARACTER_LIMIT } from "../config/config.js";
+import { CHARACTER_LIMIT } from "../config/config.ts";
 
 export type ToolResult = {
   [key: string]: unknown;

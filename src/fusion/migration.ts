@@ -15,8 +15,8 @@
  * GraphQL round trip per tenant per cache window.
  */
 
-import { CLASSIC_MIGRATION_CHECK } from "../config/config.js";
-import type { CaseReferenceDataCache } from "./case-reference-data.js";
+import { CLASSIC_MIGRATION_CHECK } from "../config/config.ts";
+import type { CaseReferenceDataCache } from "./case-reference-data.ts";
 
 export const UPGRADE_CENTRE_URL =
   "https://community.sophos.com/sophos-xdr/sophos-xdr-mdr-expansion/upgrade-center";
@@ -31,10 +31,13 @@ export interface MigrationStatus {
 }
 
 export class FusionMigrationGuard {
-  constructor(
-    private referenceData: Pick<CaseReferenceDataCache, "get">,
-    private enabled: boolean = CLASSIC_MIGRATION_CHECK
-  ) {}
+  private referenceData: Pick<CaseReferenceDataCache, "get">;
+  private enabled: boolean;
+
+  constructor(referenceData: Pick<CaseReferenceDataCache, "get">, enabled: boolean = CLASSIC_MIGRATION_CHECK) {
+    this.referenceData = referenceData;
+    this.enabled = enabled;
+  }
 
   async status(tenantId: string): Promise<MigrationStatus> {
     if (!this.enabled) {

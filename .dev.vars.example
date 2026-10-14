@@ -1,0 +1,8 @@
+# Copy to .dev.vars for `wrangler dev` (never commit .dev.vars).
+# Sophos Central > Global Settings > API Credentials Management. A partner,
+# organization or tenant credential works; partner/org callers pass tenant_id.
+SOPHOS_CLIENT_ID=
+SOPHOS_CLIENT_SECRET=
+# /mcp refuses every request in env mode until MCP_AUTH_TOKEN or
+# CONDUIT_S2S_SECRET is set. Clients send "Authorization: Bearer <token>".
+MCP_AUTH_TOKEN=

@@ -4,7 +4,7 @@
  * success until the body has been read.
  */
 
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   FusionClient,
@@ -12,17 +12,18 @@ import {
   formatGraphQLError,
   interpretGraphQLBody,
   isMutation,
-} from "../dist/client/fusion-client.js";
+} from "../src/client/fusion-client.ts";
+import type { FusionClientOptions, GraphQLErrorEntry } from "../src/client/fusion-client.ts";
 
 const tokenManager = { getToken: async () => "test-token" };
 const url = "https://fusion.test/graphql";
 const originalFetch = globalThis.fetch;
 
-test.afterEach(() => {
+afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-function json(body, init = {}) {
+function json(body: unknown, init: ResponseInit = {}): Response {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -30,17 +31,22 @@ function json(body, init = {}) {
   });
 }
 
+interface Call {
+  url: string;
+  init: any;
+}
+
 /** Installs a fetch stub. handler(attemptNumber, init) returns a Response. */
-function stubFetch(handler) {
-  const calls = [];
-  globalThis.fetch = async (input, init) => {
+function stubFetch(handler: (attempt: number, init: any) => Response | Promise<Response>): Call[] {
+  const calls: Call[] = [];
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     calls.push({ url: String(input), init });
     return handler(calls.length, init);
-  };
+  }) as typeof fetch;
   return calls;
 }
 
-function makeClient(options = {}) {
+function makeClient(options: FusionClientOptions = {}): FusionClient {
   return new FusionClient(tokenManager, { url, backoffBaseMs: 1, retries: 2, ...options });
 }
 
@@ -55,7 +61,7 @@ test("posts JSON with the bearer token, X-Tenant-ID and the document plus variab
   const calls = stubFetch(() => json({ data: { ok: true } }));
   await makeClient().query("tenant-1", "query Q($a: Int) { ok }", { a: 1 });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, url);
+  assert.equal(calls[0]!.url, url);
   const { init } = calls[0];
   assert.equal(init.method, "POST");
   assert.equal(init.headers.Authorization, "Bearer test-token");
@@ -76,7 +82,7 @@ test("200 with errors and null data throws with every message joined", async () 
   );
   await assert.rejects(
     () => makeClient().query("tenant-1", "query { cases }"),
-    (error) => {
+    (error: any) => {
       assert.ok(error instanceof FusionGraphQLError);
       assert.match(error.message, /Cannot query field x \(path: cases\) \[GRAPHQL_VALIDATION_FAILED\]/);
       assert.match(error.message, /second problem/);
@@ -99,7 +105,7 @@ test("200 with data beside errors returns the data and non-empty warnings", asyn
     })
   );
   const result = await makeClient().query("tenant-1", "query { case }");
-  assert.equal(result.data.case.id, "c1");
+  assert.equal((result.data as any).case.id, "c1");
   assert.deepEqual(result.warnings, ["subject unavailable (path: case.assigneeSubject)"]);
 });
 
@@ -167,7 +173,7 @@ test("401 with only a message field reports the message without UnknownError", a
   stubFetch(() => json({ message: "unauthorized token" }, { status: 401 }));
   await assert.rejects(
     () => makeClient().query("tenant-1", "query { x }"),
-    (error) => {
+    (error: any) => {
       assert.equal(error.message, "Sophos Fusion API error 401: unauthorized token");
       return true;
     }
@@ -187,7 +193,7 @@ test("notFound is true only when every error says record not found", async () =>
   );
   await assert.rejects(
     () => makeClient().query("tenant-1", "query { case }"),
-    (error) => {
+    (error: any) => {
       assert.ok(error instanceof FusionGraphQLError);
       assert.equal(error.notFound, true);
       return true;
@@ -229,8 +235,8 @@ test("5xx exhausts the retries and throws the last error", async () => {
 
 test("a hung request is aborted at the timeout and reported as such", async () => {
   stubFetch(
-    (_attempt, init) =>
-      new Promise((_resolve, reject) => {
+    (_attempt, init: any) =>
+      new Promise<Response>((_resolve, reject) => {
         init.signal.addEventListener("abort", () =>
           reject(new DOMException("The operation was aborted", "AbortError"))
         );
@@ -243,8 +249,8 @@ test("a hung request is aborted at the timeout and reported as such", async () =
 });
 
 test("interpretGraphQLBody rejects a body with neither data nor errors", () => {
-  assert.throws(() => interpretGraphQLBody({}), /neither data nor errors/);
-  assert.throws(() => interpretGraphQLBody(null), /neither data nor errors/);
+  assert.throws(() => interpretGraphQLBody({} as any), /neither data nor errors/);
+  assert.throws(() => interpretGraphQLBody(null as any), /neither data nor errors/);
 });
 
 test("formatGraphQLError includes path and extension code when present", () => {
@@ -287,7 +293,7 @@ test("the transient fault is bounded at 20 attempts and the exhaustion names the
   const calls = stubFetch(() => json(transientBody));
   await assert.rejects(
     () => makeClient({ transientBackoffMs: 1 }).query("tenant-1", "mutation { createCase }"),
-    (error) => {
+    (error: any) => {
       assert.ok(error instanceof FusionGraphQLError);
       assert.match(error.message, /not allowed \(path: partnerPreferences\) \[DOWNSTREAM_SERVICE_ERROR\]/);
       assert.match(error.message, /persisted across 20 attempts/);
@@ -308,7 +314,7 @@ test("an error carrying the operation name in path is not retried", async () => 
     );
     await assert.rejects(
       () => makeClient({ transientBackoffMs: 1 }).query("tenant-1", "mutation { x }"),
-      (error) => {
+      (error: any) => {
         assert.ok(error instanceof FusionGraphQLError);
         assert.equal(error.isTransientPartnerPreferences, false);
         return true;
@@ -330,7 +336,7 @@ test("DOWNSTREAM_SERVICE_ERROR alone does not trigger the retry; only the partne
 });
 
 test("isTransientPartnerPreferences reads the first error's first path segment only", () => {
-  const make = (errors) => new FusionGraphQLError("m", errors);
+  const make = (errors: GraphQLErrorEntry[]) => new FusionGraphQLError("m", errors);
   assert.equal(make([{ message: "not allowed", path: ["partnerPreferences"] }]).isTransientPartnerPreferences, true);
   assert.equal(
     make([{ message: "not allowed", path: ["createCase", "partnerPreferences"] }]).isTransientPartnerPreferences,
@@ -358,11 +364,11 @@ test("putPresigned PUTs the bytes with the content type and no bearer token", as
   const calls = stubFetch(() => new Response(null, { status: 200 }));
   await makeClient().putPresigned("https://s3.test/upload?sig=1", new Uint8Array([104, 105]), "text/plain");
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "https://s3.test/upload?sig=1");
-  assert.equal(calls[0].init.method, "PUT");
-  assert.equal(calls[0].init.headers["Content-Type"], "text/plain");
-  assert.equal(calls[0].init.headers.Authorization, undefined);
-  assert.deepEqual([...calls[0].init.body], [104, 105]);
+  assert.equal(calls[0]!.url, "https://s3.test/upload?sig=1");
+  assert.equal(calls[0]!.init.method, "PUT");
+  assert.equal(calls[0]!.init.headers["Content-Type"], "text/plain");
+  assert.equal(calls[0]!.init.headers.Authorization, undefined);
+  assert.deepEqual([...calls[0]!.init.body], [104, 105]);
 });
 
 test("putPresigned reports a failed upload with the HTTP status", async () => {
@@ -385,8 +391,8 @@ test("a mutation that gets a 5xx is not retried, because it may already have tak
 
 test("a mutation that times out is not retried either", async () => {
   const calls = stubFetch(
-    (_attempt, init) =>
-      new Promise((_resolve, reject) => {
+    (_attempt, init: any) =>
+      new Promise<Response>((_resolve, reject) => {
         init.signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted", "AbortError")));
       })
   );

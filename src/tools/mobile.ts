@@ -17,12 +17,12 @@
  * Interact with the Sophos Mobile API /mobile/v1
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SophosClient } from "../client/sophos-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import { jsonResult, withErrorHandling } from "./helpers.js";
-import { DEFAULT_PAGE_SIZE } from "../config/config.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { SophosClient } from "../client/sophos-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import { jsonResult, withErrorHandling } from "./helpers.ts";
+import { DEFAULT_PAGE_SIZE } from "../config/config.ts";
 
 // Field names and enums follow the Sophos Mobile API spec (mobile-v1 1.0.13).
 const ownershipTypeSchema = z.enum(["corporate", "employee"]);
@@ -58,7 +58,7 @@ function compact(object: Record<string, unknown>): Record<string, unknown> {
 }
 
 export function registerMobileTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: SophosClient,
   tenantResolver: TenantResolver
 ): void {

@@ -3,11 +3,11 @@
  * Interact with the Sophos Account Health Check API /account-health-check/v1/health-check
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SophosClient } from "../client/sophos-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import { jsonResult, withErrorHandling } from "./helpers.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { SophosClient } from "../client/sophos-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import { jsonResult, withErrorHandling } from "./helpers.ts";
 
 const HEALTH_PATH = "/account-health-check/v1/health-check";
 const CONCURRENCY = 10;
@@ -150,7 +150,7 @@ function analyseGaps(
 }
 
 export function registerHealthTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: SophosClient,
   tenantResolver: TenantResolver
 ): void {
@@ -196,7 +196,7 @@ Returns:
   );
 
   // Bulk tools: only useful for partner/org callers who manage multiple tenants
-  if (tenantResolver.getIdentity().idType !== "tenant") {
+  if (tenantResolver.isMultiTenant()) {
     server.registerTool(
       "sophos_list_account_health",
       {
@@ -233,7 +233,7 @@ Returns:
         },
       },
       withErrorHandling(async ({ limit }) => {
-        const tenants = tenantResolver.getCachedTenants();
+        const tenants = await tenantResolver.loadTenants();
 
         // Fetch health for all tenants in parallel batches
         type HealthEntry = {
@@ -352,7 +352,7 @@ Returns:
         async ({ protection_threshold, flag_missing_server_protection, limit }) => {
           const threshold = protection_threshold ?? 80;
           const flagServerGap = flag_missing_server_protection ?? false;
-          const tenants = tenantResolver.getCachedTenants();
+          const tenants = await tenantResolver.loadTenants();
 
           type TenantGapResult = {
             tenant_id: string;

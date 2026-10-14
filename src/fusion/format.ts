@@ -4,7 +4,7 @@
  * the detection record formatter.
  */
 
-import type { FusionDetectionEntity, FusionDetectionRecord, FusionTimestamp } from "./types.js";
+import type { FusionDetectionEntity, FusionDetectionRecord, FusionTimestamp } from "./types.ts";
 
 /**
  * Case severity is an integer. Sophos documents these five values and says

@@ -7,10 +7,26 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SophosClient } from "../dist/client/sophos-client.js";
+import { SophosClient } from "../src/client/sophos-client.ts";
+import type { TenantResolver } from "../src/client/tenant-resolver.ts";
+import type { ToolRegistry } from "../src/tools/registry.ts";
+import { registerEmailTools } from "../src/tools/email.ts";
+import { registerAlertTools } from "../src/tools/alerts.ts";
+import { registerEndpointTools } from "../src/tools/endpoints.ts";
+import { registerEndpointSettingsTools } from "../src/tools/endpoint-settings.ts";
+import { registerExclusionTools } from "../src/tools/exclusions.ts";
+import { registerEndpointMigrationTools } from "../src/tools/endpoint-migrations.ts";
+import { registerDirectoryTools } from "../src/tools/directory.ts";
+import { registerAdminManagementTools } from "../src/tools/admin-management.ts";
+import { registerPartnerTools } from "../src/tools/partner.ts";
+import { registerFirewallTools } from "../src/tools/firewall.ts";
+import { registerDnsProtectionTools } from "../src/tools/dns-protection.ts";
+import { registerWifiTools } from "../src/tools/wifi.ts";
+import { registerMobileTools } from "../src/tools/mobile.ts";
+import { registerUserActivityTools } from "../src/tools/user-activity.ts";
+import { registerXdrTools } from "../src/tools/xdr.ts";
+import { registerCloudSecurityTools } from "../src/tools/cloud-security.ts";
+import { connect } from "./harness.ts";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const HOST = "https://api-au01.central.sophos.com";
@@ -18,59 +34,61 @@ const A = "00000000-0000-4000-8000-0000000000a1";
 const B = "00000000-0000-4000-8000-0000000000b1";
 const C = "00000000-0000-4000-8000-0000000000c1";
 
+type Answer = (method: string, path: string, query: Record<string, string>, body: any) => unknown;
+type Registrar = (server: ToolRegistry, client: SophosClient, tenantResolver: TenantResolver) => void;
+
+interface Call {
+  method: string;
+  path: string;
+  query: Record<string, string>;
+  body: any;
+}
+
 /**
  * Registers one tools module on a real SophosClient. `answer(method, path, query)`
  * returns the JSON body for a request (default {}).
  */
-async function harness(modulePath, registrar, answer = () => ({})) {
-  const mod = await import(modulePath);
-  const calls = [];
+async function harness(registrar: Registrar, answer: Answer = () => ({})) {
+  const calls: Call[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: any, init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
     const method = init?.method ?? "GET";
-    const body = init?.body === undefined ? undefined : JSON.parse(init.body);
+    const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
     const query = Object.fromEntries(u.searchParams);
     calls.push({ method, path: u.pathname, query, body });
     return new Response(JSON.stringify(answer(method, u.pathname, query, body) ?? {}), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
-  };
+  }) as typeof fetch;
   const identity = { id: TENANT, idType: "partner", apiHosts: { global: "https://api.central.sophos.com" } };
   const tenantResolver = {
     resolveApiHost: async () => HOST,
-    resolveTenantId: (id) => id ?? TENANT,
+    resolveTenantId: (id?: string) => id ?? TENANT,
     getIdentity: () => identity,
     getIdHeader: () => ({ name: "X-Partner-ID", value: TENANT }),
-  };
+  } as unknown as TenantResolver;
   const client = new SophosClient({ getToken: async () => "fake-token" }, tenantResolver);
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  mod[registrar](server, client, tenantResolver);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
+  const mcp = connect((server) => registrar(server, client, tenantResolver));
   return {
     calls,
-    async call(name, args) {
+    async call(name: string, args: Record<string, unknown>) {
       const result = await mcp.callTool({ name, arguments: args });
-      const text = result.content.map((c) => c.text ?? "").join("\n");
-      return { isError: Boolean(result.isError), text, json: result.isError ? null : JSON.parse(text) };
+      const text = result.content.map((c) => c.text).join("\n");
+      return { isError: Boolean(result.isError), text, json: result.isError ? null : (JSON.parse(text) as any) };
     },
     async close() {
-      await mcp.close();
-      await server.close();
       globalThis.fetch = realFetch;
     },
   };
 }
 
-const sent = (h) => h.calls.map(({ method, path, query, body }) => ({ method, path, query, body }));
-const req = (method, path, body, query = {}) => ({ method, path, query, body });
+const sent = (h: { calls: Call[] }) => h.calls.map(({ method, path, query, body }) => ({ method, path, query, body }));
+const req = (method: string, path: string, body?: unknown, query: Record<string, string> = {}) => ({ method, path, query, body });
 
 test("email quarantine tools use the /quarantine/messages routes and batch bodies", async () => {
-  const h = await harness("../dist/tools/email.js", "registerEmailTools", (m, p) =>
+  const h = await harness(registerEmailTools, (m: string, p: string) =>
     p.endsWith("/attachments/download") ? { id: "job", status: "done", url: "https://example.invalid/x" } : {}
   );
   try {
@@ -115,7 +133,7 @@ test("email quarantine tools use the /quarantine/messages routes and batch bodie
 });
 
 test("email clawback, status and post-delivery release use the spec routes", async () => {
-  const h = await harness("../dist/tools/email.js", "registerEmailTools");
+  const h = await harness(registerEmailTools);
   try {
     await h.call("sophos_clawback_message", { message_id: A, reason: "phishing" });
     await h.call("sophos_get_clawback_status", { message_id: A });
@@ -138,7 +156,7 @@ test("email clawback, status and post-delivery release use the spec routes", asy
 });
 
 test("mailbox tools send type, email and name, and change aliases with add/remove lists", async () => {
-  const h = await harness("../dist/tools/email.js", "registerEmailTools", (m, p) =>
+  const h = await harness(registerEmailTools, (m: string, p: string) =>
     m === "GET" && p.endsWith(A) ? { id: A, email: "zz@example.com", aliases: ["a@example.com"], delegates: [] } : {}
   );
   try {
@@ -165,7 +183,7 @@ test("mailbox tools send type, email and name, and change aliases with add/remov
 });
 
 test("alerts page by key, and the search sends flat filters", async () => {
-  const h = await harness("../dist/tools/alerts.js", "registerAlertTools", () => ({ items: [], pages: { size: 0, maxSize: 1000, nextKey: "next" } }));
+  const h = await harness(registerAlertTools, () => ({ items: [], pages: { size: 0, maxSize: 1000, nextKey: "next" } }));
   try {
     const list = await h.call("sophos_list_alerts", { severity: "high", page_from_key: "k1" });
     await h.call("sophos_search_alerts", { severity: ["high"], category: ["malware"], sort: ["raisedAt:desc"], page_from_key: "k2" });
@@ -187,7 +205,7 @@ test("alerts page by key, and the search sends flat filters", async () => {
 });
 
 test("endpoint actions send the spec bodies", async () => {
-  const h = await harness("../dist/tools/endpoints.js", "registerEndpointTools");
+  const h = await harness(registerEndpointTools);
   try {
     await h.call("sophos_bulk_delete_endpoints", { ids: [A] });
     await h.call("sophos_request_forensic_logs", { endpoint_id: A, expires: "PT1H" });
@@ -200,14 +218,14 @@ test("endpoint actions send the spec bodies", async () => {
       req("POST", `/endpoint/v1/endpoints/${A}/memory-dumps`, { mode: "process", expires: "PT30M", imageName: "lsass.exe" }),
     ]);
     assert.match(refused.text, /needs pid or image_name/);
-    assert.match(badDuration.text, /Input validation error/);
+    assert.match(badDuration.text, /Invalid arguments for tool/);
   } finally {
     await h.close();
   }
 });
 
 test("endpoint settings: blocked addresses in bulk, IPS and isolation exclusions, TLS categories", async () => {
-  const h = await harness("../dist/tools/endpoint-settings.js", "registerEndpointSettingsTools");
+  const h = await harness(registerEndpointSettingsTools);
   try {
     await h.call("sophos_add_blocked_address", { addresses: ["203.0.113.7", "198.51.100.0/24"], comment: "ZZ", expire_in_days: 7 });
     await h.call("sophos_delete_blocked_address", { address_ids: [A] });
@@ -236,10 +254,10 @@ test("endpoint settings: blocked addresses in bulk, IPS and isolation exclusions
 });
 
 test("allowed and blocked items need a comment; scanning exclusions send comment, not description", async () => {
-  const h = await harness("../dist/tools/exclusions.js", "registerExclusionTools", () => ({ id: A, properties: {} }));
+  const h = await harness(registerExclusionTools, () => ({ id: A, properties: {} }));
   try {
     const noComment = await h.call("sophos_add_allowed_item", { type: "sha256", properties: { sha256: "ab" } });
-    assert.match(noComment.text, /Input validation error/);
+    assert.match(noComment.text, /Invalid arguments for tool/);
     await h.call("sophos_add_blocked_item", { properties: { sha256: "ab" }, comment: "ZZ" });
     await h.call("sophos_add_exclusion", { type: "web", value: "example.com", comment: "ZZ" });
     assert.deepEqual(sent(h), [
@@ -252,7 +270,7 @@ test("allowed and blocked items need a comment; scanning exclusions send comment
 });
 
 test("migrations: the receiving side POSTs, the sending side PUTs to the job", async () => {
-  const h = await harness("../dist/tools/endpoint-migrations.js", "registerEndpointMigrationTools");
+  const h = await harness(registerEndpointMigrationTools);
   try {
     await h.call("sophos_create_migration", { side: "receiving", from_tenant: B, endpoints: [A] });
     await h.call("sophos_create_migration", { side: "sending", migration_id: C, token: "t0k", endpoints: [A] });
@@ -272,7 +290,7 @@ test("migrations: the receiving side POSTs, the sending side PUTs to the job", a
 });
 
 test("user group policies come from the policy list, filtered by the group", async () => {
-  const h = await harness("../dist/tools/directory.js", "registerDirectoryTools", (m, p, q) =>
+  const h = await harness(registerDirectoryTools, (m: string, p: string, q: Record<string, string>) =>
     p === "/endpoint/v1/policies"
       ? q.page === "1"
         ? { items: [{ id: A, name: "P1", type: "web-control", enabled: true, priority: 1, appliesTo: { users: [], userGroups: [B] } }], pages: { total: 2 } }
@@ -284,14 +302,14 @@ test("user group policies come from the policy list, filtered by the group", asy
     assert.deepEqual(json.policies, [{ id: A, name: "P1", type: "web-control", enabled: true, priority: 1 }]);
     assert.equal(h.calls.length, 2, "both pages read");
     await h.call("sophos_list_roles", { type: "custom" });
-    assert.deepEqual(h.calls.at(-1).query, { type: "custom" });
+    assert.deepEqual(h.calls.at(-1)!.query, { type: "custom" });
   } finally {
     await h.close();
   }
 });
 
 test("admins are created from a directory user; roles carry principal type and permission sets", async () => {
-  const h = await harness("../dist/tools/admin-management.js", "registerAdminManagementTools");
+  const h = await harness(registerAdminManagementTools);
   try {
     await h.call("sophos_create_admin", { user_id: A, role_id: B });
     await h.call("sophos_create_role", { name: "ZZ", principal_type: "user", permission_sets: ["central_readonly", "endpoint_product_readonly"] });
@@ -309,7 +327,7 @@ test("admins are created from a directory user; roles carry principal type and p
 
 test("partner tools send the spec bodies, and billing pages by key without re-reading page one", async () => {
   let pages = 0;
-  const h = await harness("../dist/tools/partner.js", "registerPartnerTools", (m, p, q) => {
+  const h = await harness(registerPartnerTools, (m: string, p: string, q: Record<string, string>) => {
     if (p.startsWith("/partner/v1/billing/usage")) {
       pages++;
       return q.pageFromKey === "k2"
@@ -346,7 +364,7 @@ test("partner tools send the spec bodies, and billing pages by key without re-re
     ]);
 
     await h.call("sophos_get_billing_usage", { year: 2026, month: 9, cursor: "k2" });
-    assert.equal(h.calls.at(-1).query.pageFromKey, "k2");
+    assert.equal(h.calls.at(-1)!.query.pageFromKey, "k2");
     pages = 0;
     const summary = await h.call("sophos_get_billing_summary", { year: 2026, month: 9 });
     assert.equal(pages, 2, "two distinct pages, then stop");
@@ -358,7 +376,7 @@ test("partner tools send the spec bodies, and billing pages by key without re-re
 });
 
 test("firewall groups: create needs assignFirewalls, a single group is found through the list, a firewall moves through its group", async () => {
-  const h = await harness("../dist/tools/firewall.js", "registerFirewallTools", (m, p) =>
+  const h = await harness(registerFirewallTools, (m: string, p: string) =>
     m === "GET" && p === "/firewall/v1/firewall-groups" ? { items: [{ id: B, name: "ZZ" }], pages: { total: 1 } } : {}
   );
   try {
@@ -381,7 +399,7 @@ test("firewall groups: create needs assignFirewalls, a single group is found thr
 });
 
 test("DNS locations send ipAddresses and domainNames; updates take full lists or add/remove", async () => {
-  const h = await harness("../dist/tools/dns-protection.js", "registerDnsProtectionTools");
+  const h = await harness(registerDnsProtectionTools);
   try {
     await h.call("sophos_create_dns_location", { name: "ZZ office", ip_addresses: ["203.0.113.7"] });
     await h.call("sophos_update_dns_location", { location_id: A, add_ip_addresses: ["203.0.113.8"], domain_names: ["example.com"] });
@@ -397,7 +415,7 @@ test("DNS locations send ipAddresses and domainNames; updates take full lists or
 });
 
 test("Wi-Fi MAC filtering reads the list and PUTs it back", async () => {
-  const h = await harness("../dist/tools/wifi.js", "registerWifiTools", (m, p, q, body) =>
+  const h = await harness(registerWifiTools, (m: string, p: string, q: Record<string, string>, body: any) =>
     m === "GET" ? { macAddresses: ["00:11:22:33:44:55"] } : body
   );
   try {
@@ -415,7 +433,7 @@ test("Wi-Fi MAC filtering reads the list and PUTs it back", async () => {
 });
 
 test("mobile actions wrap their options in arguments; the device list filters by platform and compliance", async () => {
-  const h = await harness("../dist/tools/mobile.js", "registerMobileTools");
+  const h = await harness(registerMobileTools);
   try {
     await h.call("sophos_lock_mobile_device", { device_id: A, message: "Call IT", pin: "123456" });
     await h.call("sophos_locate_mobile_device", { device_id: A, reason: "Lost" });
@@ -435,7 +453,7 @@ test("mobile actions wrap their options in arguments; the device list filters by
 });
 
 test("attestations, XDR cancel and the cloud security content lookup use the spec routes", async () => {
-  const ua = await harness("../dist/tools/user-activity.js", "registerUserActivityTools");
+  const ua = await harness(registerUserActivityTools);
   try {
     await ua.call("sophos_create_attestation", {
       user_id: A, title: "Check", question: "Was this you?", options: [{ key: "yes", text: "Yes" }], timeout_in_seconds: 600,
@@ -454,14 +472,14 @@ test("attestations, XDR cancel and the cloud security content lookup use the spe
   } finally {
     await ua.close();
   }
-  const xdr = await harness("../dist/tools/xdr.js", "registerXdrTools");
+  const xdr = await harness(registerXdrTools);
   try {
     await xdr.call("sophos_cancel_xdr_query_run", { run_id: A });
     assert.deepEqual(sent(xdr), [req("POST", `/xdr-query/v1/queries/runs/${A}/cancel`, {})]);
   } finally {
     await xdr.close();
   }
-  const cs = await harness("../dist/tools/cloud-security.js", "registerCloudSecurityTools", () => ({ items: [{ id: A, version: "2026.26.7" }] }));
+  const cs = await harness(registerCloudSecurityTools, () => ({ items: [{ id: A, version: "2026.26.7" }] }));
   try {
     const { json } = await cs.call("sophos_list_cloud_security_default_contents", {});
     assert.deepEqual(json, { total: 1, contents: [{ id: A, version: "2026.26.7" }] });

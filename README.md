@@ -5,172 +5,77 @@
 > Sophos. It calls the public Sophos APIs using credentials you supply. Use it at your own
 > risk, and raise problems as issues on this repository rather than with Sophos support.
 
-MCP (Model Context Protocol) server for the Sophos Fusion and Sophos Central APIs. Supports partner, organisation, and single-tenant credential types with automatic region routing. **305 tools** covering 22 Sophos API namespaces: the Sophos Central REST APIs plus the Sophos Fusion GraphQL APIs (`sophos_fusion_*`). Install it as a Claude Desktop extension (`.mcpb`), run it with npx, or host it yourself over streamable HTTP.
+MCP (Model Context Protocol) server for the Sophos Fusion (formerly Sophos Central) APIs. Supports partner, organisation, and single-tenant credential types with automatic region routing. **305 tools** covering 22 Sophos API namespaces: the Sophos Central REST APIs plus the Sophos Fusion GraphQL APIs (`sophos_fusion_*`). It runs as a dependency-free TypeScript Cloudflare Worker that speaks MCP over streamable HTTP.
 
-The npm package, the `.mcpb` bundle and the binaries keep the `sophos-central-mcp-server` name so existing installs update in place.
+The Worker is named `sophos-mcp` in `wrangler.json`. The MCP server name it reports stays `sophos-central-mcp-server`.
 
 ## Prerequisites
 
-You need these before any of the install options below.
+### Sophos API credentials
 
-### Sophos Central API credentials
-
-Every install method needs a Client ID and Client Secret. The same credential authorises both the Sophos Central REST tools and the Sophos Fusion GraphQL tools; there is no second credential. The credential type decides what the server can see:
+You need a Client ID and Client Secret. The same credential authorises both the Sophos Central REST tools and the Sophos Fusion GraphQL tools; there is no second credential. The credential type decides what the server can see:
 
 - **Tenant-level**: In Sophos Central, go to **Settings > API Credentials Management** and create a new credential. The server operates on that one tenant.
 - **Partner-level**: In the Sophos Partner Dashboard, create API credentials under **Settings > API Credentials**. The server can query every tenant the partner manages.
 - **Organisation-level**: In Sophos Central Enterprise, use **Global Settings > API Credentials Management**. Same cross-tenant behaviour as partner credentials.
 
-### Node.js 20 or later (npm and self-hosted installs only)
+### Cloudflare account
 
-The `.mcpb` bundle for Claude Desktop does not need Node.js on your machine: Claude Desktop ships its own Node.js runtime and the bundle carries the server and all of its dependencies. Install Node.js 20+ only if you use the Claude Code or self-hosted options.
+You need a Cloudflare account to deploy the Worker. Development needs Node.js 24 or later, which runs the TypeScript sources directly through native type stripping. The only dev dependencies are `tsc-rs` (a Rust port of the TypeScript compiler) and `wrangler`.
 
-## Install
-
-Pick one:
-
-| Option | Best for | Needs Node.js? |
-|--------|----------|----------------|
-| [Claude Desktop extension (.mcpb)](#option-1-claude-desktop-extension-mcpb-recommended) | Claude Desktop users who want a two-minute install | No |
-| [Claude Code](#option-2-claude-code) | Terminal use with Claude Code | Yes |
-| [Self-hosted with npm](#option-3-self-hosted-with-npm-streamable-http-or-stdio) | Running the server yourself for any MCP client, over streamable HTTP or stdio | Yes |
-
-### Option 1: Claude Desktop extension (.mcpb, recommended)
-
-The `.mcpb` file is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb): a zip containing the built server, its production dependencies, and a manifest that tells Claude Desktop how to run it and which settings to ask for. No terminal and no config file edits.
-
-1. Download `sophos-central-mcp-server-<version>.mcpb` from the [latest GitHub release](https://github.com/Aaronjacobs000/sophos-mcp/releases/latest).
-2. Open the file with Claude Desktop. Double-clicking it works on macOS and Windows. You can also go to **Settings > Extensions > Advanced settings**, find the **Extension Developer** section, click **Install Extension...** and pick the file.
-3. Claude Desktop shows the extension details and asks for your **Sophos Central Client ID** and **Client Secret**. Both fields are marked sensitive in the manifest, so Claude Desktop keeps them in the operating system's secure storage instead of a config file.
-4. Click **Install**, make sure the extension is enabled, then start a new chat. The `sophos_*` tools are available straight away.
-
-To update, download the newer `.mcpb` and install it the same way. To remove it, open **Settings > Extensions** and uninstall the extension.
-
-To change the credentials later, open **Settings > Extensions** and click this extension. The **Sophos Central Client ID** and **Client Secret** fields are editable there. They are stored in the operating system's secure storage and show masked, so you replace a value rather than read the old one back. The server reads them at startup, so toggle the extension off and on, or restart Claude Desktop, if a change does not take effect.
-
-The bundle runs the server in stdio mode and sets `TRANSPORT=stdio` for you. Which tools you get depends on the credential type, exactly as with the other install options: partner and organisation credentials unlock the cross-tenant tools, tenant credentials do not.
-
-### Option 2: Claude Code
-
-Requires Node.js. Run this once in your terminal. The `-e` flags save the credentials permanently to Claude Code's MCP config so you don't need to re-export them each session:
-
-**macOS / Linux:**
+## Deploy
 
 ```bash
-claude mcp add sophos-central \
-  -e SOPHOS_CLIENT_ID="your-client-id" \
-  -e SOPHOS_CLIENT_SECRET="your-client-secret" \
-  -e TRANSPORT="stdio" \
-  -- npx -y sophos-central-mcp-server
-```
-
-**Windows (Command Prompt):**
-
-```cmd
-claude mcp add sophos-central ^
-  -e SOPHOS_CLIENT_ID="your-client-id" ^
-  -e SOPHOS_CLIENT_SECRET="your-client-secret" ^
-  -e TRANSPORT="stdio" ^
-  -- cmd /c npx -y sophos-central-mcp-server
-```
-
-### Option 3: Self-hosted with npm (streamable HTTP or stdio)
-
-Use this when you want to run the server yourself, on a workstation, a jump box, or in a container, for any MCP client that speaks streamable HTTP or can spawn a stdio process. Nothing here depends on the `.mcpb` bundle.
-
-**Install from npm:**
-
-```bash
-npm install -g sophos-central-mcp-server
-```
-
-**Or from source:**
-
-```bash
-git clone https://github.com/Aaronjacobs000/sophos-mcp.git
+git clone https://github.com/XeoSpheric/sophos-mcp.git
 cd sophos-mcp
-npm install
-npm run build
+npm ci
+
+npx wrangler secret put SOPHOS_CLIENT_ID
+npx wrangler secret put SOPHOS_CLIENT_SECRET
+npx wrangler secret put MCP_AUTH_TOKEN        # or CONDUIT_S2S_SECRET
+
+npm run deploy
 ```
 
-**Configure.** Either export the variables in your shell or put them in a `.env` file in the directory you start the server from. The full table is under [Configuration](#configuration).
+Make the token with something like `openssl rand -hex 32`. In the default `env` mode `/mcp` refuses every request (503) until `MCP_AUTH_TOKEN` or `CONDUIT_S2S_SECRET` is set. A `workers.dev` URL is public and the secrets are your own Sophos credentials, so there is no open mode.
 
-```
-SOPHOS_CLIENT_ID=your-client-id
-SOPHOS_CLIENT_SECRET=your-client-secret
-PORT=3100
-TRANSPORT=http
-```
-
-**Run:**
+Connect a client to `https://sophos-mcp.<account>.workers.dev/mcp` and have it send `Authorization: Bearer <token>`. In Claude Code:
 
 ```bash
-sophos-central-mcp      # global npm install
-npm start               # from a source checkout
+claude mcp add --transport http sophos https://sophos-mcp.<account>.workers.dev/mcp --header "Authorization: Bearer <token>"
 ```
 
-With `TRANSPORT=http` (the default) the server listens on `http://127.0.0.1:3100/mcp` (`MCP_HTTP_HOST` and `PORT` change that) and answers `GET /health` with `{"status":"ok","server":"sophos-central-mcp-server"}`. The MCP endpoint is stateless: every request gets a fresh server and transport, so concurrent tool calls work. Point any streamable HTTP client at it, for example Claude Code:
+Write tools are hidden and refused until you set `ALLOW_WRITES` to `true`. See [Configuration](#configuration).
+
+### Endpoints
+
+- `POST /mcp`: MCP Streamable HTTP, stateless. It serves both the 2025-era JSON-RPC protocol (the `initialize` handshake, with single-shot SSE replies when the client accepts `text/event-stream`) and the 2026-07-28 protocol (`server/discover`).
+- `GET /health` (or `/healthz`): unauthenticated. Returns `{status, server, version, authMode, writes, timestamp}`.
+- `OPTIONS`: CORS preflight, with `Access-Control-Allow-Origin: *`.
+
+Without credentials, `initialize` and `tools/list` still work (all tools are listed) and a tool call returns a "Missing Sophos credentials" tool error. For a tenant credential the partner and organisation only tools are not listed.
+
+### Local development
 
 ```bash
-claude mcp add --transport http sophos-central http://127.0.0.1:3100/mcp
+npm ci
+cp .dev.vars.example .dev.vars   # then fill in credentials
+npm run dev                      # local workerd via wrangler dev, http://localhost:8787/mcp
 ```
 
-With `TRANSPORT=stdio` the server speaks MCP over stdin/stdout and is meant to be spawned by the client, which is what Options 1 and 2 do for you.
-
-By default the HTTP server binds to `127.0.0.1` and has no authentication. It refuses any request with a browser `Origin` other than `localhost`, `127.0.0.1`, `[::1]` or one listed in `MCP_ALLOWED_ORIGINS`, so a web page cannot drive it by cross-site POST or DNS rebinding. MCP clients that are not browsers send no `Origin`, so this does not affect them, on this machine or another.
-
-### Using it from other machines
-
-To let agents on other machines use the server:
-
-1. Make a token, for example `openssl rand -hex 32`.
-2. Start the server listening on the network, with the token:
-
-   ```bash
-   MCP_HTTP_HOST=0.0.0.0 MCP_HTTP_TOKEN=<token> TRANSPORT=http npm start
-   ```
-
-   `0.0.0.0` listens on every interface. To listen on one only, use that interface's address, such as a LAN or Tailscale IP.
-3. Point each client at `http://<server>:3100/mcp` and have it send `Authorization: Bearer <token>`. In Claude Code:
-
-   ```bash
-   claude mcp add --transport http sophos-central http://<server>:3100/mcp --header "Authorization: Bearer <token>"
-   ```
-
-Every `/mcp` request without the right token gets a 401. `/health` stays open. Without a token, anyone who can reach the port can use every tool with your Sophos credentials, and the server prints a warning at startup saying so.
-
-Plain HTTP sends the token and tool results in clear text. On any network you don't fully trust, encrypt it: TLS through a reverse proxy (Caddy or nginx, say), or reach the server over Tailscale.
-
-A browser based MCP client on another machine sends an `Origin` and is refused until you add that origin to `MCP_ALLOWED_ORIGINS`. Agents and CLI clients need nothing there.
-
-### Build the .mcpb yourself (maintainers)
-
-The bundle is produced by `scripts/build-mcpb.mjs` using the `mcpb` CLI, which is a dev dependency. From a source checkout:
-
-```bash
-npm install
-npm run build:mcpb
-```
-
-The script:
-
-1. Compiles TypeScript to `dist/` (via `npm run build`).
-2. Rewrites `manifest.json` so its `version` matches `package.json` and its `tools` list matches every `registerTool` call in `src/tools/`. Commit the result. The manifest in git is always the one that was last built.
-3. Validates the manifest with `mcpb validate`.
-4. Stages `dist/`, `package.json`, `LICENSE`, and `manifest.json` in `build/mcpb/` and runs `npm ci --omit=dev` there, so only production dependencies are bundled. `.mcpbignore` adds a few exclusions on top of the CLI's defaults.
-5. Packs the staging directory into `release/sophos-central-mcp-server-<version>.mcpb`.
-
-`build/` and `release/` are git-ignored. To inspect a bundle without installing it, `npx mcpb info release/<file>.mcpb` prints its size and signature state, and `npx mcpb unpack release/<file>.mcpb <dir>` extracts it. Signing is optional; `npx mcpb sign --self-signed release/<file>.mcpb` adds a self-signed signature if you want one.
+| Command | What it does |
+|---------|--------------|
+| `npm run typecheck` | Type check with `tsc-rs` |
+| `npm test` | Run the `node:test` suites on the `.ts` sources directly. `fetch` is stubbed; nothing reaches Sophos |
+| `npm run build` | `wrangler deploy --dry-run`, output in `dist-dry-run/` |
+| `npm run dev` | Local Worker, reads `.dev.vars` |
+| `npm run deploy` | `wrangler deploy` |
 
 ### Tests (maintainers)
 
-```bash
-npm test
-```
+`npm test` runs these suites in `test/`, with `fetch` stubbed: Worker routing, access control, gateway mode and both protocol versions; the schema builder; the Fusion GraphQL transport (including the HTTP 200 with `errors` case); the QL builder; the reference-data cache; the path-keyed retry for the intermittent case-write fault; the migration guard; the policy assignment and web profile writes (body shapes, refusals, target lookups and read-back) against an in-memory policy store; the no-retry rule for a POST or mutation after a 5xx; the read-modify-write and PATCH update tools; the request shapes of the tools checked against the published specs; a registration check that lists all 305 tools and checks the descriptions for the measured warnings; and the reworked firewall backup, firewall import and case file upload tools. Nothing in `npm test` reaches Sophos.
 
-Builds, then runs the `node:test` suites in `test/` with `fetch` stubbed: the Fusion GraphQL transport (including the HTTP 200 with `errors` case), the QL builder, the reference-data cache, and the path-keyed retry for the intermittent case-write fault, the migration guard, the policy assignment and web profile writes (body shapes, refusals, target lookups and read-back) against an in-memory policy store, the no-retry rule for a POST or mutation after a 5xx, the read-modify-write and PATCH update tools, the request shapes of the tools checked against the published specs, a registration check that lists all 305 tools over an in-memory transport and checks the descriptions for the measured warnings, the `SOPHOS_FUSION_GRAPHQL_URL` check, and the HTTP transport (Origin guard, bearer token, listen address, concurrent calls) run against an in-memory Sophos. Nothing in `npm test` reaches Sophos.
-
-To exercise the Fusion tools against a live tenant, put credentials in `.env` (or export them) and run:
+To exercise the Fusion tools against a live tenant, start a Worker (`npm run dev`, with credentials in `.dev.vars`) and run:
 
 ```bash
 node scripts/fusion-smoke.mjs                  # read-only, tenant credential
@@ -180,9 +85,7 @@ node scripts/fusion-smoke.mjs --write-classic  # plus the Classic case tools on 
 node scripts/fusion-smoke.mjs --all            # everything
 ```
 
-It spawns the built server over stdio and calls the tools through an MCP client, so what runs is what a host runs. Read-only mode covers the reference data, the case list with filter and cursor variants, the newest case by short ID, its evidence, summary, comments and files, the detection search, the not-found and legacy-ID refusals, and the Classic side: on a migrated tenant the migration refusal, otherwise the six Classic read tools. `--write` creates one case titled `MCP smoke test <timestamp>` (managed_by CUSTOMER), exercises comment add, edit and delete with the mention read-back, link create, update and delete, tag merge and replace, evidence add and remove_all, file upload, list and soft delete, the verdict clear on reopen, the one way door on new and the closed-case freeze, then closes it with a verdict and archives it (Fusion has no delete). `--write-classic` creates, updates and deletes one Classic case; the Cases API requires an assignee and a detection that still exists, so set `SMOKE_CLASSIC_ASSIGNEE` (a tenant admin email) and, if needed, `SMOKE_CLASSIC_DETECTION_ID` (a recent detection ID). Every write is listed at the end. Existing cases are never modified.
-
-**Cutting a release:** bump `version` in `package.json`, run `npm run build:mcpb`, commit `package.json`, `package-lock.json`, and `manifest.json`, tag, and attach the `.mcpb` from `release/` to the GitHub release. Publish to npm as before so the Claude Code and self-hosted options pick up the same version.
+It talks MCP over HTTP to the running Worker, so what runs is what a client gets. Set `MCP_URL` (default `http://localhost:8787/mcp`) and `MCP_AUTH_TOKEN` to match the Worker. The write modes need `ALLOW_WRITES=true` on the Worker. Read-only mode covers the reference data, the case list with filter and cursor variants, the newest case by short ID, its evidence, summary, comments and files, the detection search, the not-found and legacy-ID refusals, and the Classic side: on a migrated tenant the migration refusal, otherwise the six Classic read tools. `--write` creates one case titled `MCP smoke test <timestamp>` (managed_by CUSTOMER), exercises comment add, edit and delete with the mention read-back, link create, update and delete, tag merge and replace, evidence add and remove_all, file upload, list and soft delete, the verdict clear on reopen, the one way door on new and the closed-case freeze, then closes it with a verdict and archives it (Fusion has no delete). `--write-classic` creates, updates and deletes one Classic case; the Cases API requires an assignee and a detection that still exists, so set `SMOKE_CLASSIC_ASSIGNEE` (a tenant admin email) and, if needed, `SMOKE_CLASSIC_DETECTION_ID` (a recent detection ID). Every write is listed at the end. Existing cases are never modified.
 
 ## Features
 
@@ -192,8 +95,8 @@ It spawns the built server over stdio and calls the tools through an MCP client,
 - **Auto region routing**: Discovers tenant data regions via `/whoami/v1` and routes requests to the correct regional API host
 - **Token lifecycle**: Automatic OAuth2 token refresh before expiry
 - **Rate limit handling**: Retry with backoff on 429 responses
-- **Dual transport**: stdio (Claude Desktop, Claude Code, and the `.mcpb` bundle) or streamable HTTP (self-hosted)
-- **One-click install**: Ships as a Claude Desktop extension (`.mcpb`) with credentials held in the OS secure store
+- **Cloudflare Worker**: No runtime dependencies, stateless streamable HTTP, deployed with `wrangler`
+- **Read-only by default**: write tools are hidden and refused until `ALLOW_WRITES=true`
 - **Two API generations**: the Sophos Central REST APIs and the Sophos Fusion GraphQL APIs on one credential, with `sophos_fusion_*` tools for the GraphQL side
 - **Migration aware**: the Classic case and detection tools refuse a tenant that has moved to Sophos Fusion and name the `sophos_fusion_*` tool to use instead
 - **Full API coverage**: 305 tools across endpoints, alerts, policies, firewalls, web filtering, licensing, audit events, email, mobile, XDR, cases, SIEM, and more
@@ -212,29 +115,25 @@ It spawns the built server over stdio and calls the tools through an MCP client,
 
 ## Configuration
 
-Applies to the Claude Code and self-hosted options. The Claude Desktop extension asks for the credentials in its install dialog and sets `TRANSPORT=stdio` itself.
+Set secrets with `wrangler secret put <NAME>` and variables in `wrangler.json` under `vars`. For `npm run dev`, put both in `.dev.vars` (see `.dev.vars.example`).
 
-Copy `.env.example` to `.env` and set your credentials:
+| Name | Kind | Default | Description |
+|------|------|---------|-------------|
+| `SOPHOS_CLIENT_ID`, `SOPHOS_CLIENT_SECRET` | secrets | - | Sophos API credential (partner, organisation or tenant). Required in `env` mode |
+| `MCP_AUTH_TOKEN` | secret | - | When set, `/mcp` needs `Authorization: Bearer <token>` |
+| `CONDUIT_S2S_SECRET` | secret | - | When set, `/mcp` needs a valid `X-Gateway-S2S` header: `t=<unix seconds>,v1=<hex HMAC-SHA256 of "t=<secs>">`, within 5 minutes of the Worker clock |
+| `AUTH_MODE` | var | `env` | `env` uses the secrets above. `gateway` means every request brings its own credentials in `X-Sophos-Client-Id` and `X-Sophos-Client-Secret` headers; missing headers are a 401, never a fall back to the secrets. Worker Previews run in gateway mode |
+| `ALLOW_WRITES` | var | `false` | Write tools (every tool not annotated `readOnlyHint`) are hidden from `tools/list` and refused unless `true`. Previews are always read-only. With it off, 157 of the 305 tools are listed |
+| `CHARACTER_LIMIT` | var | 50000 | Maximum characters per tool response before truncation (minimum 10000) |
+| `SOPHOS_FUSION_GRAPHQL_URL` | var | `https://api.taegis.sophos.com/graphql` | Sophos Fusion GraphQL endpoint. Must be `https` on a `sophos.com` host, since the bearer token goes to it; the Worker refuses to serve otherwise |
+| `SOPHOS_CLASSIC_MIGRATION_CHECK` | var | on | `off` skips the migration check on the Classic case and detection tools (they then run for every tenant) |
+| `LOG_LEVEL` | var | `info` | `error`, `warn`, `info` or `debug` |
+| `LOG_FORMAT` | var | `json` | `json` or `simple` |
+| `MCP_SERVER_NAME`, `MCP_SERVER_VERSION` | var | - | Override the server name and version the Worker reports |
 
-```
-SOPHOS_CLIENT_ID=your-client-id
-SOPHOS_CLIENT_SECRET=your-client-secret
-PORT=3100
-TRANSPORT=http
-```
+In `env` mode `/mcp` returns 503 until `MCP_AUTH_TOKEN` or `CONDUIT_S2S_SECRET` is set.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SOPHOS_CLIENT_ID` | Yes | - | OAuth2 client ID |
-| `SOPHOS_CLIENT_SECRET` | Yes | - | OAuth2 client secret |
-| `PORT` | No | 3100 | HTTP server port |
-| `TRANSPORT` | No | http | `http` for streamable HTTP, `stdio` for subprocess mode |
-| `MCP_HTTP_HOST` | No | 127.0.0.1 | Address the HTTP server binds to. `0.0.0.0` for every interface, or one interface's IP. See [Using it from other machines](#using-it-from-other-machines) |
-| `MCP_HTTP_TOKEN` | No | - | When set, every `/mcp` request needs `Authorization: Bearer <token>`. `/health` stays open. Set it whenever `MCP_HTTP_HOST` is not loopback |
-| `MCP_ALLOWED_ORIGINS` | No | - | Comma separated browser origins (`https://host:port`) allowed besides localhost ones. Only browser based clients need this |
-| `CHARACTER_LIMIT` | No | 50000 | Maximum characters per tool response before truncation (minimum 10000) |
-| `SOPHOS_FUSION_GRAPHQL_URL` | No | `https://api.taegis.sophos.com/graphql` | Sophos Fusion GraphQL endpoint. Override when the Fusion branded hostnames ship. Must be `https` on a `sophos.com` host, since the bearer token goes to it; the server refuses to start otherwise |
-| `SOPHOS_CLASSIC_MIGRATION_CHECK` | No | on | `off` skips the migration check on the Classic case and detection tools (they then run for every tenant) |
+The caller identity (`/whoami/v1`), the OAuth token, the tenant list (reloaded after 15 minutes) and the Fusion case reference data (15 minute TTL) are cached per credential, per Worker isolate, as plain data.
 
 ## Tools
 
@@ -475,7 +374,7 @@ Sophos Fusion Cases GraphQL API v2. Case IDs are UUIDs; short IDs (`CSE00001`) a
 | `sophos_fusion_add_case_evidence` | Attach detections, events, hosts or saved searches (asynchronous, RNs checked) |
 | `sophos_fusion_remove_case_evidence` | Detach evidence by source ID, or everything with remove_all (asynchronous) |
 | `sophos_fusion_list_case_files` | List a case's files (deleted hidden by default, download URLs on request) |
-| `sophos_fusion_upload_case_file` | Attach a file: register, PUT to the presigned URL, poll to UPLOADED |
+| `sophos_fusion_upload_case_file` | Attach a file from `content` or `content_base64` (exactly one; `name` required): register, PUT to the presigned URL, poll to UPLOADED |
 | `sophos_fusion_delete_case_file` | Soft delete a file |
 | `sophos_fusion_create_case_link` | Attach an external link (ServiceNow ticket, report) |
 | `sophos_fusion_update_case_link` | Change a link's URL, title, type or reference |
@@ -559,15 +458,17 @@ Async API: run OSquery SQL on live endpoints. Rate limited to 10 runs/minute, 50
 | `sophos_get_firewall_transaction` | Poll a per-firewall transaction (threat feed ops) |
 | `sophos_export_firewall_config` | Start a config export (backup) of a firewall |
 | `sophos_get_firewall_import_export_transaction` | Poll an export/import transaction |
-| `sophos_download_firewall_backup` | Download a finished backup archive to a local file |
-| `sophos_import_firewall_config` | Upload and import a config archive into firewalls |
+| `sophos_download_firewall_backup` | Check a finished backup and return `download_url`, `expires_at`, `file_size_bytes` and `checksum_md5` (read-only; the URL is a secret until it expires) |
+| `sophos_import_firewall_config` | Import a config archive into firewalls, from exactly one of `source_url` (https, fetched with no Sophos token) or `content_base64` |
 
 Config import/export requires the firewall to run SFOS v22 MR2 or later, be
 managed by Sophos Central, and hold an active license. On an HA pair, target
 the primary node (the auxiliary rejects config operations). The exported
 archive can appear in storage a couple of minutes after the transaction
-reports finished; `sophos_download_firewall_backup` retries automatically
-for about 3 minutes to cover that window.
+reports finished; `sophos_download_firewall_backup` fetches the archive from the
+pre-signed URL to confirm it is there, retrying for about 3 minutes to cover that
+window. The Worker has no local disk, so it returns the link instead of saving
+a file. Pass that `download_url` as `source_url` to `sophos_import_firewall_config`.
 
 ### Email Protection (29 tools)
 
@@ -745,39 +646,61 @@ For **partner/org** callers, every tenant-scoped tool requires a `tenant_id` par
 
 For **tenant-level** callers, `tenant_id` is optional and defaults to the authenticated tenant.
 
+
 ## Architecture
 
 ```
-Authenticate (OAuth2 client credentials)
+POST /mcp
     |
     v
-/whoami/v1 -> Discover identity type (partner | organization | tenant)
+src/worker.ts: route, CORS, access control (bearer token or S2S, or gateway headers)
     |
     v
-If partner/org: enumerate tenants, cache {tenantId -> apiHost}
+src/session.ts: per-request Session, credentials -> per-credential cached state
     |
     v
-Register tools based on identity type
+OAuth2 token -> /whoami/v1 (partner | organization | tenant) -> tenant list {tenantId -> apiHost}
     |
     v
 Per tool call: resolve tenant -> regional API host -> execute request
 Per sophos_fusion_* call: resolve tenant -> POST api.taegis.sophos.com/graphql -> inspect data and errors
 ```
 
+- `src/worker.ts`: the entry point. Routing, CORS, access control, and the only `export default`.
+- `src/mcp.ts`: the MCP protocol, both the 2025-era JSON-RPC flow and the 2026-07-28 flow.
+- `src/session.ts`: the per-request `Session`, the per-credential shared state (plain data only), and tool registration. A request never awaits a promise another request created.
+- `src/tools/registry.ts`: `ToolRegistry` with `registerTool`, `tools/list`, argument validation and the write gate.
+- `src/schema.ts`: a dependency-free, zod-shaped schema builder that produces JSON Schema for `tools/list` and validates arguments.
+- `src/config/config.ts`, `src/auth/token-manager.ts`: configuration and the OAuth2 token lifecycle.
+- `src/client/*`: the REST and GraphQL clients (retries, path safety, the GraphQL 200 rule) and the tenant resolver.
+- `src/fusion/*`: GraphQL documents, case reference data, the QL builder, formatting and the migration guard.
+
 ### Key decisions
 
-- **Dynamic tool registration**: Only tools valid for the caller type are exposed to the LLM
+- **Conditional tool listing**: Only tools valid for the caller type are exposed to the LLM
 - **Explicit tenant context**: Partner/org callers must specify `tenant_id` to prevent cross-tenant accidents
-- **Stateless HTTP**: Each MCP request creates a fresh server and transport instance (no session affinity)
-- **Localhost by default**: HTTP server binds to `127.0.0.1` unless `MCP_HTTP_HOST` says otherwise
+- **Stateless**: Each MCP request builds a fresh session; only plain data is cached across requests, per credential
+- **Read-only by default**: write tools are off until `ALLOW_WRITES=true`
 
 ## Project Structure
 
 ```
+wrangler.json                    # Worker name, vars, observability
+tsconfig.json
+package.json
+.dev.vars.example                # Local secrets and vars for npm run dev
+.github/workflows/ci.yml
+docs/screenshots/
+schemas/fusion/                  # The five Fusion GraphQL schemas, as downloaded
+scripts/fusion-smoke.mjs         # Live check over MCP HTTP
 src/
-├── index.ts                     # Entry point, server bootstrap
-├── http-guard.ts                # HTTP transport: refuse foreign browser Origins, optional bearer token
-├── config/config.ts             # Environment config
+├── worker.ts                    # Entry: routing, CORS, access control
+├── mcp.ts                       # MCP protocol (both versions)
+├── session.ts                   # Per-request session, shared per-credential state, tool registration
+├── schema.ts                    # Dependency-free schema builder (JSON Schema + validation)
+├── log.ts                       # Logging
+├── util.ts                      # Shared helpers
+├── config/config.ts             # Config from Worker env
 ├── auth/token-manager.ts        # OAuth2 token lifecycle
 ├── client/
 │   ├── sophos-client.ts         # REST client with region routing (Sophos Central)
@@ -792,12 +715,16 @@ src/
 │   ├── migration.ts             # Has this tenant moved to Fusion? Gates the Classic case and detection tools
 │   └── types.ts                 # Fusion response types
 ├── tools/
+│   ├── registry.ts              # ToolRegistry: registration, listing, validation, write gate
 │   ├── helpers.ts               # Shared response formatting
 │   ├── fusion-cases.ts          # Sophos Fusion cases (GraphQL)
 │   ├── fusion-detections.ts     # Sophos Fusion detection search (GraphQL)
 │   ├── tenants.ts               # Tenant listing (partner/org only)
 │   ├── partner.ts               # Partner admin, roles, billing (partner/org only)
+│   ├── accounts.ts              # Accounts and access tokens
 │   ├── alerts.ts                # Alert list, get, acknowledge, search
+│   ├── audit-events.ts          # Audit events
+│   ├── business-automation.ts   # Billing and quote automation
 │   ├── endpoints.ts             # Endpoint CRUD, scan, isolate, tamper, forensics
 │   ├── endpoint-settings.ts     # Installer, web control, exploit mitigation, IPS, etc.
 │   ├── endpoint-migrations.ts   # Migration jobs, software packages
@@ -809,6 +736,7 @@ src/
 │   ├── exclusions.ts            # Scanning exclusions, allowed/blocked items
 │   ├── cases.ts                 # Investigation cases, detections, MITRE
 │   ├── detections.ts            # Detection queries (async)
+│   ├── licensing.ts             # Licences
 │   ├── siem.ts                  # SIEM events and alerts
 │   ├── xdr.ts                   # XDR Data Lake queries (async)
 │   ├── live-discover.ts         # Live Discover queries (async)
@@ -817,22 +745,27 @@ src/
 │   ├── mobile.ts                # Mobile devices, groups, actions, policies
 │   ├── dns-protection.ts        # DNS locations
 │   ├── cloud-security.ts        # Cloud security profiles, assets
+│   ├── switch.ts                # Switch management
+│   ├── web-filtering.ts         # Web filtering profiles and rules
 │   ├── wifi.ts                  # Wi-Fi MAC filtering
 │   └── user-activity.ts         # User attestations
 └── types/sophos.ts              # Sophos API response types
+test/                            # node:test suites (*.test.ts), plus harness.ts, setup.ts and fakes
 ```
 
-Packaging files at the repo root: `manifest.json` (MCPB manifest, regenerated by the build), `scripts/build-mcpb.mjs` (bundle builder), and `.mcpbignore` (extra exclusions applied when packing). `schemas/fusion/` holds the five Fusion GraphQL schemas as downloaded from `https://developer.sophos.com/assets/graphql/<api>.graphql` on 21/09/2026, unmodified, for reference and for diffing when Sophos changes them. `test/` holds the `node:test` suites and `scripts/fusion-smoke.mjs` the live check.
+`schemas/fusion/` holds the five Fusion GraphQL schemas as downloaded from `https://developer.sophos.com/assets/graphql/<api>.graphql` on 21/09/2026, unmodified, for reference and for diffing when Sophos changes them.
 
 ## Security
 
-- Credentials are read from environment variables only, never logged
-- JWT tokens are held in memory with automatic refresh
-- HTTP server binds to `127.0.0.1` by default and refuses requests from a browser `Origin` that is not localhost or listed in `MCP_ALLOWED_ORIGINS`. If `MCP_HTTP_HOST` opens it to the network, set `MCP_HTTP_TOKEN` and put TLS in front (a reverse proxy or Tailscale)
+- Credentials are Worker secrets (or, in gateway mode, per-request headers), never logged, and never written to disk
+- `/mcp` access control is a bearer token (`MCP_AUTH_TOKEN`) or a signed `X-Gateway-S2S` header (`CONDUIT_S2S_SECRET`). One of them is required in `env` mode: without it `/mcp` returns 503. In gateway mode a request without its own credential headers is a 401 and never falls back to the secrets
+- `ALLOW_WRITES` defaults to `false`: write tools are not listed and are refused. Previews are always read-only
+- OAuth tokens are cached in memory per credential and refreshed before they expire
+- `SOPHOS_FUSION_GRAPHQL_URL` must be `https` on a `sophos.com` host, since the bearer token goes to it; the Worker refuses to serve otherwise
+- The REST client refuses a request path where an ID argument carries a `.` or `..` segment (encoded too), `?`, `#`, a backslash, an encoded `/` or a control character, so a crafted ID cannot redirect a call to another resource
+- Pre-signed URLs (case file uploads, firewall backups and imports) never get the Sophos token. A backup `download_url` is a secret until it expires
 - Write actions have `destructiveHint` annotations so clients can warn users
 - Partner/org callers require explicit `tenant_id` on every call
-- The REST client refuses a request path where an ID argument carries a `.` or `..` segment (encoded too), `?`, `#`, a backslash, an encoded `/` or a control character, so a crafted ID cannot redirect a call to another resource
-- With the `.mcpb` install, Claude Desktop holds the credentials in the OS secure store (they are `sensitive` in `manifest.json`) and hands them to the server as environment variables when it starts the process
 
 ## License
 
