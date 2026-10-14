@@ -1,7 +1,7 @@
 /**
  * Handler-level tests for policy assignment (appliesTo) writes through the
  * real SophosClient and the registered schemas, against the in-memory policy
- * API in fake-policy-api.mjs: body shapes, the user/device and server/computer
+ * API in fake-policy-api.ts: body shapes, the user/device and server/computer
  * refusals, the target lookups, add/remove merging, clone with assignment and
  * the read-back. No network.
  */
@@ -12,7 +12,7 @@ import {
   policyHarness as harness,
   U1, U2, UG1, E1, ES1, EV1, G1, G2, G3, MISSING,
   P_USER, P_DEVICE, P_SERVER, P_EMPTY,
-} from "./fake-policy-api.mjs";
+} from "./fake-policy-api.ts";
 
 test("create with users sends plain IDs, reads the policy back by ID and reports what is stored", async () => {
   const h = await harness();
@@ -77,12 +77,13 @@ test("create with no assignment sends no appliesTo and, outside web control, mak
 test("a user and device mix is refused before anything is sent", async () => {
   const h = await harness();
   try {
-    for (const [name, args] of [
+    const cases: Array<[string, Record<string, unknown>]> = [
       ["sophos_create_policy", { name: "ZZ mix", type: "web-control", users: [U1], endpoints: [E1] }],
       ["sophos_update_policy", { policy_id: P_USER, user_groups: [UG1], endpoint_groups: [G1] }],
       ["sophos_set_policy_assignments", { policy_id: P_USER, mode: "add", users: [], endpoints: [E1] }],
       ["sophos_clone_policy", { source_policy_id: P_USER, name: "ZZ clone mix", users: [U1], endpoints: [E1] }],
-    ]) {
+    ];
+    for (const [name, args] of cases) {
       const { isError, text } = await h.call(name, args);
       assert.equal(isError, true, name);
       assert.match(text, /never both/, name);
@@ -173,7 +174,7 @@ test("{id} objects are refused by the schema", async () => {
   try {
     const { isError, text } = await h.call("sophos_create_policy", { name: "ZZ obj", type: "web-control", users: [{ id: U1 }] });
     assert.equal(isError, true);
-    assert.match(text, /Input validation error/);
+    assert.match(text, /Invalid arguments for tool sophos_create_policy/);
     assert.equal(h.calls.length, 0);
   } finally {
     await h.close();
@@ -397,7 +398,7 @@ test("list and get report the stored plain ID arrays and the kind", async () => 
   const h = await harness();
   try {
     const list = await h.call("sophos_list_policies", {});
-    const byId = new Map(list.json.policies.map((p) => [p.id, p]));
+    const byId = new Map<string, any>(list.json.policies.map((p: any) => [p.id, p]));
     assert.deepEqual(byId.get(P_USER).applies_to, { kind: "user", users: 1, user_groups: 0 });
     assert.deepEqual(byId.get(P_DEVICE).applies_to, { kind: "device", endpoints: 1, endpoint_groups: 1 });
     assert.deepEqual(byId.get(P_SERVER).applies_to, { kind: "device", endpoints: 0, endpoint_groups: 0 });

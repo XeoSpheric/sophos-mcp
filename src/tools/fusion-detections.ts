@@ -6,21 +6,21 @@
  * detections.ts, which are refused for a tenant that has migrated to Fusion.
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { FusionClient } from "../client/fusion-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "../config/config.js";
-import { formatDetection } from "../fusion/format.js";
-import { DETECTION_SEARCH } from "../fusion/queries/detections.js";
-import type { FusionDetectionSearchResponse } from "../fusion/types.js";
-import { jsonResult, withErrorHandling, withWarnings } from "./helpers.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { FusionClient } from "../client/fusion-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "../config/config.ts";
+import { formatDetection } from "../fusion/format.ts";
+import { DETECTION_SEARCH } from "../fusion/queries/detections.ts";
+import type { FusionDetectionSearchResponse } from "../fusion/types.ts";
+import { jsonResult, withErrorHandling, withWarnings } from "./helpers.ts";
 
 /** The query verified against a live tenant on 22/09/2026. */
 export const DEFAULT_DETECTION_QUERY = "from alert severity >= 0.1 EARLIEST=-90d";
 
 export function registerFusionDetectionTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: FusionClient,
   tenantResolver: TenantResolver
 ): void {

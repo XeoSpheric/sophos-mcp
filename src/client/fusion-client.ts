@@ -18,9 +18,10 @@
  * error path and bounded (see FusionGraphQLError.isTransientPartnerPreferences).
  */
 
-import { SOPHOS_FUSION_GRAPHQL_URL } from "../config/config.js";
-import type { TokenManager } from "../auth/token-manager.js";
-import type { SophosApiError } from "../types/sophos.js";
+import { SOPHOS_FUSION_GRAPHQL_URL } from "../config/config.ts";
+import type { TokenManager } from "../auth/token-manager.ts";
+import { log } from "../log.ts";
+import type { SophosApiError } from "../types/sophos.ts";
 
 /** One entry of a GraphQL response `errors` array. */
 export interface GraphQLErrorEntry {
@@ -74,11 +75,11 @@ const TRANSIENT_BACKOFF_CAP_MS = 2000;
 
 /** Thrown when the GraphQL layer returns errors and no usable data. */
 export class FusionGraphQLError extends Error {
-  constructor(
-    message: string,
-    readonly errors: GraphQLErrorEntry[]
-  ) {
+  readonly errors: GraphQLErrorEntry[];
+
+  constructor(message: string, errors: GraphQLErrorEntry[]) {
     super(message);
+    this.errors = errors;
     this.name = "FusionGraphQLError";
   }
 
@@ -117,10 +118,10 @@ export class FusionClient {
   private readonly transientAttempts: number;
   private readonly transientBackoffMs: number;
 
-  constructor(
-    private tokenManager: TokenManager,
-    options: FusionClientOptions = {}
-  ) {
+  private readonly tokenManager: Pick<TokenManager, "getToken">;
+
+  constructor(tokenManager: Pick<TokenManager, "getToken">, options: FusionClientOptions = {}) {
+    this.tokenManager = tokenManager;
     this.url = options.url ?? SOPHOS_FUSION_GRAPHQL_URL;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.retries = options.retries ?? 2;
@@ -178,8 +179,8 @@ export class FusionClient {
         }
         const cap = Math.min(this.transientBackoffMs * Math.pow(2, attempt - 1), TRANSIENT_BACKOFF_CAP_MS);
         const backoff = Math.round(Math.random() * cap);
-        console.error(
-          `[fusion-client] Transient partnerPreferences fault, retrying in ${backoff}ms (attempt ${attempt} of ${this.transientAttempts})`
+        log.warn(
+          `Transient partnerPreferences fault, retrying in ${backoff}ms (attempt ${attempt} of ${this.transientAttempts})`
         );
         await this.sleep(backoff);
       }
@@ -242,8 +243,8 @@ export class FusionClient {
           const waitMs = retryAfter
             ? parseInt(retryAfter, 10) * 1000
             : this.backoffBaseMs * 5;
-          console.error(
-            `[fusion-client] Rate limited, waiting ${waitMs}ms (attempt ${attempt + 1})`
+          log.warn(
+            `Rate limited, waiting ${waitMs}ms (attempt ${attempt + 1})`
           );
           await this.sleep(waitMs);
           continue;
@@ -303,8 +304,8 @@ export class FusionClient {
           // Full-jitter exponential backoff, as the Sophos rate-limit guidance recommends
           const cap = this.backoffBaseMs * Math.pow(2, attempt);
           const backoff = Math.round(Math.random() * cap);
-          console.error(
-            `[fusion-client] Request failed, retrying in ${backoff}ms: ${lastError.message}`
+          log.warn(
+            `Request failed, retrying in ${backoff}ms: ${lastError.message}`
           );
           await this.sleep(backoff);
         }

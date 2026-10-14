@@ -5,16 +5,16 @@
  * Interact with the Sophos Endpoint Migration and Software Package APIs.
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SophosClient } from "../client/sophos-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import type { SophosPagedResponse } from "../types/sophos.js";
-import { jsonResult, withErrorHandling } from "./helpers.js";
-import { DEFAULT_PAGE_SIZE } from "../config/config.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { SophosClient } from "../client/sophos-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import type { SophosPagedResponse } from "../types/sophos.ts";
+import { jsonResult, withErrorHandling } from "./helpers.ts";
+import { DEFAULT_PAGE_SIZE } from "../config/config.ts";
 
 export function registerEndpointMigrationTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: SophosClient,
   tenantResolver: TenantResolver
 ): void {

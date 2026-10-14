@@ -8,11 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SophosClient } from "../dist/client/sophos-client.js";
-import { registerWebFilteringTools } from "../dist/tools/web-filtering.js";
+import { SophosClient } from "../src/client/sophos-client.ts";
+import { registerWebFilteringTools } from "../src/tools/web-filtering.ts";
+import { connect, text as resultText } from "./harness.ts";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const HOST = "https://api-au01.central.sophos.com";
@@ -20,13 +18,13 @@ const POLICY = "00000000-0000-4000-8000-0000000000e1";
 const PROFILE = "00000000-0000-4000-8000-0000000000f1";
 const LIST = "00000000-0000-4000-8000-0000000000f2";
 
-const reply = (status, body) =>
+const reply = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 const WRITABLE = ["name", "description", "filterByCategory", "preset", "categoryGroupActions", "categoryActions", "filterBySiteList", "siteListActions"];
 
 async function harness() {
-  const profiles = new Map([
+  const profiles = new Map<string, any>([
     [PROFILE, {
       id: PROFILE,
       name: "ZZ profile",
@@ -40,10 +38,10 @@ async function harness() {
       updatedAt: "2026-10-13T00:00:00.000Z",
     }],
   ]);
-  const lists = new Map([[LIST, { id: LIST, name: "ZZ list", description: "keep me too", sites: ["a.example", "b.example"] }]]);
-  const calls = [];
+  const lists = new Map<string, any>([[LIST, { id: LIST, name: "ZZ list", description: "keep me too", sites: ["a.example", "b.example"] }]]);
+  const calls: { url: URL; method: string; headers: any; body: any }[] = [];
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = (async (url: any, init?: any) => {
     const u = new URL(String(url));
     const method = init?.method ?? "GET";
     const body = init?.body === undefined ? undefined : JSON.parse(init.body);
@@ -60,35 +58,30 @@ async function harness() {
         return reply(400, { error: "badRequest", message: "Profile preset specified with categoryActions." });
       }
       // PUT replaces: every writable field not in the body is cleared; consumers is ignored
-      const next = { id, consumers: item.consumers };
+      const next: Record<string, any> = { id, consumers: item.consumers };
       const writable = kind === "profiles" ? WRITABLE : ["name", "description", "sites"];
       for (const key of writable) if (key in body) next[key] = body[key];
       map.set(id, next);
       return reply(200, next);
     }
     return reply(405, { error: "methodNotAllowed" });
-  };
-  const tenantResolver = { resolveApiHost: async () => HOST, resolveTenantId: (tid) => tid ?? TENANT };
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerWebFilteringTools(server, new SophosClient({ getToken: async () => "fake-token" }, tenantResolver), tenantResolver);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const mcp = new Client({ name: "test-client", version: "0.0.0" });
-  await mcp.connect(clientTransport);
+  }) as typeof fetch;
+  const tenantResolver: any = { resolveApiHost: async () => HOST, resolveTenantId: (tid?: string) => tid ?? TENANT };
+  const mcp = connect((server) =>
+    registerWebFilteringTools(server, new SophosClient({ getToken: async () => "fake-token" }, tenantResolver), tenantResolver)
+  );
   return {
     calls,
     profiles,
     lists,
     mcp,
     puts: () => calls.filter((c) => c.method === "PUT"),
-    async call(name, args) {
+    async call(name: string, args: Record<string, unknown>) {
       const result = await mcp.callTool({ name, arguments: args });
-      const text = result.content.map((c) => c.text ?? "").join("\n");
-      return { isError: Boolean(result.isError), text, json: result.isError ? null : JSON.parse(text) };
+      const text = resultText(result);
+      return { isError: Boolean(result.isError), text, json: (result.isError ? null : JSON.parse(text)) as any };
     },
     async close() {
-      await mcp.close();
-      await server.close();
       globalThis.fetch = realFetch;
     },
   };
@@ -105,7 +98,7 @@ test("profile create and update never send consumers, even when a caller passes 
     }
     const { tools } = await h.mcp.listTools();
     for (const name of ["sophos_create_web_filtering_profile", "sophos_update_web_filtering_profile"]) {
-      const tool = tools.find((t) => t.name === name);
+      const tool = tools.find((t: any) => t.name === name)!;
       assert.equal(tool.inputSchema.properties.consumers, undefined, `${name} takes no consumers`);
       assert.match(tool.description, /Sophos\s+ignores\s+(consumers|it)/, name);
     }
@@ -180,8 +173,8 @@ test("the replacing updates are marked destructive and say they replace the whol
     for (const [name, pattern] of [
       ["sophos_update_web_filtering_profile", /replaces the whole profile/],
       ["sophos_update_site_list", /replaces the whole list/],
-    ]) {
-      const tool = tools.find((t) => t.name === name);
+    ] as [string, RegExp][]) {
+      const tool = tools.find((t: any) => t.name === name)!;
       assert.equal(tool.annotations.destructiveHint, true, name);
       assert.match(tool.description, pattern, name);
       assert.match(tool.description, /fields you leave out keep their values/, name);

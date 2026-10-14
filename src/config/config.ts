@@ -1,94 +1,46 @@
-/**
- * Environment-based configuration for Sophos Central MCP Server.
- * Credentials are read from environment variables only.
- */
+// Worker configuration (vars/secrets), request authentication helpers and the
+// Sophos API constants. Kept out of src/worker.ts: Workers treats every named
+// export of the entry module as an entrypoint and refuses to start if one
+// isn't a handler.
 
-export interface SophosConfig {
-  clientId: string;
-  clientSecret: string;
-  tenantId?: string;
-  port: number;
-  transport: "http" | "stdio";
-  /** Address the HTTP transport binds to. 127.0.0.1 unless MCP_HTTP_HOST says otherwise. */
-  httpHost: string;
-  /** When set, every /mcp request must send it as a bearer token. */
-  httpToken?: string;
-  /** Browser origins allowed besides loopback ones, from MCP_ALLOWED_ORIGINS. */
-  allowedOrigins: string[];
-}
+import pkg from "../../package.json" with { type: "json" };
+import type { Credentials } from "../auth/token-manager.ts";
+import { constantTimeEq, hmacSha256Hex } from "../util.ts";
 
-export function loadConfig(): SophosConfig {
-  const clientId = process.env.SOPHOS_CLIENT_ID;
-  const clientSecret = process.env.SOPHOS_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      "Missing required environment variables: SOPHOS_CLIENT_ID and SOPHOS_CLIENT_SECRET must be set."
-    );
-  }
-
-  checkFusionGraphQLUrl(SOPHOS_FUSION_GRAPHQL_URL);
-
-  const rawPort = parseInt(process.env.PORT || "3100", 10);
-  if (!Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
-    throw new Error(
-      `Invalid PORT value "${process.env.PORT}". Must be an integer between 1 and 65535.`
-    );
-  }
-
-  return {
-    clientId,
-    clientSecret,
-    tenantId: process.env.SOPHOS_TENANT_ID || undefined,
-    port: rawPort,
-    transport: (process.env.TRANSPORT as "http" | "stdio") || "http",
-    httpHost: process.env.MCP_HTTP_HOST || "127.0.0.1",
-    httpToken: process.env.MCP_HTTP_TOKEN || undefined,
-    allowedOrigins: parseAllowedOrigins(process.env.MCP_ALLOWED_ORIGINS),
-  };
-}
-
-/**
- * MCP_ALLOWED_ORIGINS is a comma separated list of browser origins, such as
- * "https://inspector.example.com,http://10.0.0.5:6274". Each entry is reduced
- * to its origin (scheme, host and port) so it compares equal to the Origin
- * header a browser sends.
- */
-export function parseAllowedOrigins(value: string | undefined): string[] {
-  if (!value) return [];
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "")
-    .map((entry) => {
-      let url: URL;
-      try {
-        url = new URL(entry);
-      } catch {
-        throw new Error(`Invalid MCP_ALLOWED_ORIGINS entry "${entry}": not a URL such as https://host:port.`);
-      }
-      if (url.protocol !== "http:" && url.protocol !== "https:") {
-        throw new Error(`Invalid MCP_ALLOWED_ORIGINS entry "${entry}": it must be an http or https origin.`);
-      }
-      return url.origin;
-    });
-}
+export const VERSION: string = pkg.version;
 
 // Sophos Central global API endpoints
 export const SOPHOS_AUTH_URL = "https://id.sophos.com/api/v2/oauth2/token";
 export const SOPHOS_GLOBAL_API = "https://api.central.sophos.com";
 
 // Sophos Fusion GraphQL endpoint. One host for every tenant, no regional
-// lookup. The env override exists so the Fusion branded hostnames expected in
+// lookup. The override exists so the Fusion branded hostnames expected in
 // November 2026 need no code change.
-export const SOPHOS_FUSION_GRAPHQL_URL =
-  process.env.SOPHOS_FUSION_GRAPHQL_URL || "https://api.taegis.sophos.com/graphql";
+export const DEFAULT_FUSION_GRAPHQL_URL = "https://api.taegis.sophos.com/graphql";
+
+export const DEFAULT_PAGE_SIZE = 50;
+export const MAX_PAGE_SIZE = 100;
+
+// Settings read from the Worker env. They are the same for every request in
+// an isolate, so configFromEnv sets these module bindings and the modules
+// that import them see the current value (ESM live bindings).
+
+/** Response size limit for tool results (CHARACTER_LIMIT, minimum 10000). */
+export let CHARACTER_LIMIT = 50000;
+/** GraphQL endpoint the Fusion tools post to (SOPHOS_FUSION_GRAPHQL_URL). */
+export let SOPHOS_FUSION_GRAPHQL_URL = DEFAULT_FUSION_GRAPHQL_URL;
+/**
+ * Migration awareness for the Classic Cases and Detections REST tools. A
+ * tenant that has moved to Sophos Fusion is refused on those tools and pointed
+ * at the sophos_fusion_* equivalent, because for such a tenant the Classic
+ * APIs answer from the pre-migration Sophos Central objects. Set
+ * SOPHOS_CLASSIC_MIGRATION_CHECK=off to skip the check.
+ */
+export let CLASSIC_MIGRATION_CHECK = true;
 
 /**
- * The bearer token is sent to SOPHOS_FUSION_GRAPHQL_URL, and dotenv fills that
- * from a .env in the working directory, which for a stdio server is whatever
- * directory the client was started in (a cloned repo, say). So the override
- * must be an https URL on a sophos.com host, or the server refuses to start.
+ * The bearer token is sent to SOPHOS_FUSION_GRAPHQL_URL, so the override must
+ * be an https URL on a sophos.com host, or the Worker refuses to serve.
  */
 export function checkFusionGraphQLUrl(value: string): string {
   let url: URL;
@@ -100,24 +52,83 @@ export function checkFusionGraphQLUrl(value: string): string {
   const host = url.hostname;
   if (url.protocol !== "https:" || (host !== "sophos.com" && !host.endsWith(".sophos.com"))) {
     throw new Error(
-      `Invalid SOPHOS_FUSION_GRAPHQL_URL "${value}": it must be an https URL on a sophos.com host, because the Sophos bearer token is sent to it.`
+      `Invalid SOPHOS_FUSION_GRAPHQL_URL "${value}": it must be an https URL on a sophos.com host, because the Sophos bearer token is sent to it.`,
     );
   }
   return value;
 }
 
-// Response size limits (CHARACTER_LIMIT configurable via env var)
-export const CHARACTER_LIMIT = Math.max(
-  10000,
-  parseInt(process.env.CHARACTER_LIMIT || "50000", 10) || 50000
-);
-export const DEFAULT_PAGE_SIZE = 50;
-export const MAX_PAGE_SIZE = 100;
+export const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Mcp-Method, Mcp-Name, X-Sophos-Client-Id, X-Sophos-Client-Secret",
+  "Access-Control-Expose-Headers": "Mcp-Session-Id",
+};
 
-// Migration awareness for the Classic Cases and Detections REST tools. A
-// tenant that has moved to Sophos Fusion is refused on those tools and pointed
-// at the sophos_fusion_* equivalent, because for such a tenant the Classic
-// APIs answer from the pre-migration Sophos Central objects. Set
-// SOPHOS_CLASSIC_MIGRATION_CHECK=off to skip the check.
-export const CLASSIC_MIGRATION_CHECK =
-  (process.env.SOPHOS_CLASSIC_MIGRATION_CHECK || "on").toLowerCase() !== "off";
+export type Env = Record<string, string | undefined>;
+
+/** Workers `ExecutionContext` (only the part we use). */
+export interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+/** Configuration read from Worker vars/secrets. */
+export interface Config {
+  gatewayMode: boolean;
+  envCreds: Credentials | undefined;
+  allowWrites: boolean;
+  /** When set, /mcp requires `Authorization: Bearer <token>`. */
+  authToken: string;
+  s2sSecret: string;
+  serverName: string;
+  serverVersion: string;
+}
+
+const isTrue = (v: string | undefined) => v === "true" || v === "1";
+
+/** Read the Worker env and apply the module settings. Throws on an invalid value. */
+export function configFromEnv(env: Env): Config {
+  const get = (k: string) => (typeof env[k] === "string" && env[k] ? env[k] : undefined);
+
+  const limit = Number.parseInt(get("CHARACTER_LIMIT") ?? "50000", 10);
+  CHARACTER_LIMIT = Math.max(10000, Number.isFinite(limit) ? limit : 50000);
+  SOPHOS_FUSION_GRAPHQL_URL = checkFusionGraphQLUrl(get("SOPHOS_FUSION_GRAPHQL_URL") ?? DEFAULT_FUSION_GRAPHQL_URL);
+  CLASSIC_MIGRATION_CHECK = (get("SOPHOS_CLASSIC_MIGRATION_CHECK") ?? "on").toLowerCase() !== "off";
+
+  const clientId = get("SOPHOS_CLIENT_ID");
+  const clientSecret = get("SOPHOS_CLIENT_SECRET");
+  return {
+    gatewayMode: get("AUTH_MODE") === "gateway",
+    envCreds: clientId && clientSecret ? { clientId, clientSecret } : undefined,
+    allowWrites: isTrue(get("ALLOW_WRITES")),
+    authToken: get("MCP_AUTH_TOKEN") ?? "",
+    s2sSecret: get("CONDUIT_S2S_SECRET") ?? "",
+    serverName: get("MCP_SERVER_NAME") ?? "sophos-central-mcp-server",
+    serverVersion: get("MCP_SERVER_VERSION") ?? VERSION,
+  };
+}
+
+/** Gateway credentials from request headers; undefined when either is missing. */
+export function gatewayCredentials(header: (name: string) => string | null | undefined): Credentials | undefined {
+  const h = (k: string) => header(k)?.trim() || undefined;
+  const clientId = h("x-sophos-client-id");
+  const clientSecret = h("x-sophos-client-secret");
+  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
+}
+
+/** Check `Authorization: Bearer <token>` against MCP_AUTH_TOKEN. */
+export function verifyBearer(header: string | null | undefined, token: string): boolean {
+  const m = /^Bearer\s+(.+)$/i.exec(header?.trim() ?? "");
+  return m !== null && constantTimeEq(m[1]!, token);
+}
+
+/** Verify the gateway's `t=<secs>,v1=<hex hmac>` S2S header. */
+export async function verifyS2s(header: string | null | undefined, secret: string, nowSecs: number): Promise<boolean> {
+  if (!header || !secret) return false;
+  const m = /^t=(\d{1,15}),v1=([0-9a-f]{64})$/.exec(header);
+  if (!m) return false;
+  const ts = Number(m[1]);
+  if (Math.abs(nowSecs - ts) > 300) return false;
+  return constantTimeEq(m[2]!, await hmacSha256Hex(secret, `t=${ts}`));
+}

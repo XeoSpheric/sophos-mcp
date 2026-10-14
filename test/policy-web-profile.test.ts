@@ -1,6 +1,6 @@
 /**
  * Web profile settings on the policy write tools, against the in-memory
- * policy API (fake-policy-api.mjs), which ignores web-profile-id unless
+ * policy API (fake-policy-api.ts), which ignores web-profile-id unless
  * filter-by-web-profile.enabled is true in the same write and defaults a new
  * web control policy to web-profile.enabled true, as Sophos did on 13/10/2026.
  * No network.
@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { policyHarness as harness, P_WEB, P_USER, PROFILE } from "./fake-policy-api.mjs";
+import { policyHarness as harness, P_WEB, P_USER, PROFILE } from "./fake-policy-api.ts";
 
 const ID = "endpoint.web-control.web-profile-id";
 const FILTER = "endpoint.web-control.filter-by-web-profile.enabled";
@@ -85,7 +85,7 @@ test("a new web control policy with no profile gets web-profile.enabled false ex
     for (const type of ["web-control", "server-web-control"]) {
       const { isError, json } = await h.call("sophos_create_policy", { name: `ZZ ${type}`, type, enabled: false });
       assert.equal(isError, false);
-      assert.deepEqual(h.writes().at(-1).body.settings, { [MODE]: { value: false } });
+      assert.deepEqual(h.writes().at(-1)!.body.settings, { [MODE]: { value: false } });
       assert.deepEqual(json.web_profile_stored, { "web-profile.enabled": false });
       assert.equal(json.web_profile_matches, true);
     }

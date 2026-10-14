@@ -16,19 +16,17 @@
  * Paths verified against the firewall-v1 OpenAPI spec (Aug 2026).
  */
 
-import { z } from "zod";
-import { createHash } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, resolve as resolvePath } from "node:path";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SophosClient } from "../client/sophos-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import type { SophosPagedResponse } from "../types/sophos.js";
-import { jsonResult, withErrorHandling } from "./helpers.js";
-import { DEFAULT_PAGE_SIZE } from "../config/config.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { SophosClient } from "../client/sophos-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import type { SophosPagedResponse } from "../types/sophos.ts";
+import { jsonResult, withErrorHandling } from "./helpers.ts";
+import { DEFAULT_PAGE_SIZE } from "../config/config.ts";
+import { base64ToBytes, md5Hex, sleep } from "../util.ts";
 
 export function registerFirewallTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: SophosClient,
   tenantResolver: TenantResolver
 ): void {
@@ -1087,11 +1085,14 @@ Args:
     "sophos_download_firewall_backup",
     {
       title: "Download Sophos Firewall Backup",
-      description: `Download a finished firewall configuration export (backup) to a local file.
+      description: `Fetch a finished firewall configuration export (backup) and return its download link.
 
 Checks the export transaction; if the export has finished, downloads the
-archive from its pre-signed URL and saves it to output_path. If the export
-is still running, returns the current status so you can retry shortly.
+archive from its pre-signed URL to confirm it is there and returns that URL
+with the archive size and MD5. If the export is still running, returns the
+current status so you can retry shortly. Anyone holding the URL can read the
+backup until it expires, so treat it as a secret. Pass it as source_url to
+sophos_import_firewall_config to restore the backup.
 
 The archive can appear in storage up to a couple of minutes AFTER the
 transaction reports finished; this tool retries the download automatically
@@ -1102,30 +1103,25 @@ returned transaction_id.
 
 Args:
   - transaction_id (string): The export transaction ID.
-  - output_path (string): Local file path to save the backup archive to.
   - tenant_id (string, optional): Tenant ID. Required for partner/org callers.`,
       inputSchema: {
         transaction_id: z
           .string()
           .describe("Export transaction ID from sophos_export_firewall_config"),
-        output_path: z
-          .string()
-          .describe("Local file path to save the backup archive to"),
         tenant_id: z
           .string()
           .uuid()
           .optional()
           .describe("Tenant ID. Required for partner/org callers."),
       },
-      // Writes output_path on this machine, replacing any file already there
       annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
+        readOnlyHint: true,
+        destructiveHint: false,
         idempotentHint: true,
         openWorldHint: true,
       },
     },
-    withErrorHandling(async ({ transaction_id, output_path, tenant_id }) => {
+    withErrorHandling(async ({ transaction_id, tenant_id }) => {
       const resolvedTenantId = tenantResolver.resolveTenantId(tenant_id);
 
       const txn = await client.tenantRequest<{
@@ -1166,7 +1162,7 @@ Args:
         !dl.ok && dl.status === 404 && !urlExpired() && attempt < MAX_ATTEMPTS;
         attempt++
       ) {
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        await sleep(RETRY_DELAY_MS);
         dl = await fetch(downloadUrl);
       }
       if (!dl.ok) {
@@ -1176,19 +1172,16 @@ Args:
             : `Backup download failed (${dl.status}). The pre-signed URL may have expired (expiresAt: ${expiresAt}). Re-run sophos_export_firewall_config.`
         );
       }
-      const bytes = Buffer.from(await dl.arrayBuffer());
-
-      const savePath = resolvePath(output_path);
-      await mkdir(dirname(savePath), { recursive: true });
-      await writeFile(savePath, bytes);
+      const bytes = new Uint8Array(await dl.arrayBuffer());
 
       return jsonResult({
-        status: "downloaded",
+        status: "ready",
         transaction_id,
         firewall_id: txn.response?.firewallId,
-        file_path: savePath,
+        download_url: downloadUrl,
+        expires_at: expiresAt,
         file_size_bytes: bytes.length,
-        checksum_md5: createHash("md5").update(bytes).digest("hex"),
+        checksum_md5: md5Hex(bytes),
       });
     })
   );
@@ -1203,13 +1196,14 @@ Args:
 WARNING: This changes the configuration of the target firewalls.
 
 Runs the full import flow in one call: requests a pre-signed upload URL,
-uploads the archive from file_path, then notifies Sophos Central with the
+uploads the archive, then notifies Sophos Central with the
 target firewalls and archive checksum. Returns the import transaction; poll
 it with sophos_get_firewall_import_export_transaction for per-firewall results.
 
 Args:
   - firewall_ids (array): Target firewall IDs (at least one).
-  - file_path (string): Local path of the configuration archive to import.
+  - source_url (string, optional): https URL to fetch the archive from, such as the download_url from sophos_download_firewall_backup.
+  - content_base64 (string, optional): The archive itself, base64. Supply exactly one of source_url or content_base64.
   - secure_master_key (string, optional): Secure master key associated with the import.
   - perform_partial_import (boolean, optional): Allow partial success per firewall (default true).
   - tenant_id (string, optional): Tenant ID. Required for partner/org callers.`,
@@ -1218,9 +1212,16 @@ Args:
           .array(z.string().uuid())
           .min(1)
           .describe("Target firewall IDs (at least one)"),
-        file_path: z
+        source_url: z
           .string()
-          .describe("Local path of the configuration archive to import"),
+          .url()
+          .startsWith("https://")
+          .optional()
+          .describe("https URL of the archive, such as download_url from sophos_download_firewall_backup"),
+        content_base64: z
+          .string()
+          .optional()
+          .describe("The archive, base64. Supply exactly one of source_url or content_base64."),
         secure_master_key: z
           .string()
           .optional()
@@ -1244,10 +1245,30 @@ Args:
       },
     },
     withErrorHandling(
-      async ({ firewall_ids, file_path, secure_master_key, perform_partial_import, tenant_id }) => {
+      async ({ firewall_ids, source_url, content_base64, secure_master_key, perform_partial_import, tenant_id }) => {
         const resolvedTenantId = tenantResolver.resolveTenantId(tenant_id);
 
-        const archive = await readFile(resolvePath(file_path));
+        if ((source_url === undefined) === (content_base64 === undefined)) {
+          throw new Error("Supply exactly one of source_url or content_base64.");
+        }
+        let archive: Uint8Array<ArrayBuffer>;
+        if (content_base64 !== undefined) {
+          try {
+            archive = base64ToBytes(content_base64);
+          } catch {
+            throw new Error("content_base64 is not valid base64.");
+          }
+        } else {
+          // A plain fetch, no Sophos auth headers: the token never leaves for source_url.
+          const src = await fetch(source_url!);
+          if (!src.ok) {
+            throw new Error(`Archive download from source_url failed (${src.status}). A pre-signed URL may have expired.`);
+          }
+          archive = new Uint8Array(await src.arrayBuffer());
+        }
+        if (archive.length === 0) {
+          throw new Error("The archive is empty; nothing to import.");
+        }
 
         // Step 1: request the pre-signed upload URL.
         const init = await client.tenantRequest<{
@@ -1271,7 +1292,7 @@ Args:
         // Step 3: notify upload completion with target firewalls and archive metadata.
         const body: Record<string, unknown> = {
           firewallIds: firewall_ids,
-          checksumMd5: createHash("md5").update(archive).digest("hex"),
+          checksumMd5: md5Hex(archive),
           fileSizeBytes: archive.length,
           performPartialImport: perform_partial_import,
         };

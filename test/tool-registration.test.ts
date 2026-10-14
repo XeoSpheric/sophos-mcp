@@ -1,17 +1,15 @@
 /**
- * Registers every tool module the way src/index.ts does, connects a client
- * over an in-memory transport and lists the tools. No credentials and no
- * network: registration never calls Sophos. Proves the server still exposes
- * the 283 Classic tools plus the 21 Fusion case tools and the Fusion
- * detection search, and that the descriptions carry the measured warnings.
+ * Registers every tool module the way the Worker does (registerAllTools on a
+ * fresh ToolRegistry) and lists the tools. No credentials and no network:
+ * registration never calls Sophos. Proves the server still exposes the 283
+ * Classic tools plus the 21 Fusion case tools and the Fusion detection
+ * search, and that the descriptions carry the measured warnings.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { buildServices, registerAllTools } from "../src/session.ts";
+import { ToolRegistry } from "../src/tools/registry.ts";
 
 const FUSION_CASE_TOOLS = [
   "sophos_fusion_list_cases",
@@ -60,55 +58,20 @@ const CLASSIC_CASE_TOOLS = [
   "sophos_get_case_mitre_summary",
 ];
 
-async function listAllTools() {
-  const indexSrc = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-  const modules = [...indexSrc.matchAll(/from\s+"\.\/tools\/([a-z0-9-]+)\.js"/g)].map((m) => m[1]);
-  assert.ok(modules.length > 0, "tool modules found in src/index.ts");
+// Tool shapes are checked as plain JSON, the way a client sees tools/list.
+type Tool = any;
 
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  // Registration stores these and only reads the identity (health.ts registers
-  // its partner-only tools for partner callers). One stub fits every parameter.
-  const stub = {
-    getIdentity: () => ({
-      id: "00000000-0000-4000-8000-000000000000",
-      idType: "partner",
-      apiHosts: { global: "https://api.central.sophos.com" },
-    }),
-    getIdHeader: () => ({ name: "X-Partner-ID", value: "00000000-0000-4000-8000-000000000000" }),
-  };
-  for (const mod of modules) {
-    const exports = await import(`../dist/tools/${mod}.js`);
-    const registrars = Object.entries(exports).filter(
-      ([name, value]) => /^register\w+Tools$/.test(name) && typeof value === "function"
-    );
-    assert.ok(registrars.length > 0, `${mod} exports a register*Tools function`);
-    for (const [, register] of registrars) register(server, stub, stub, stub);
-  }
-
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  const client = new Client({ name: "test-client", version: "0.0.0" });
-  await client.connect(clientTransport);
-
-  const tools = [];
-  let cursor;
-  do {
-    const page = await client.listTools(cursor ? { cursor } : undefined);
-    tools.push(...page.tools);
-    cursor = page.nextCursor;
-  } while (cursor);
-
-  await client.close();
-  await server.close();
-  return { modules, tools };
+function listAllTools(): { registry: ToolRegistry; tools: Tool[] } {
+  const registry = new ToolRegistry();
+  // The identity is unknown until whoami runs, so the partner tools register too.
+  registerAllTools(registry, buildServices({ clientId: "x", clientSecret: "y" }));
+  return { registry, tools: registry.list(true) };
 }
 
-test("tools/list exposes the 283 Classic tools plus the 22 Fusion tools", async () => {
-  const { modules, tools } = await listAllTools();
+test("tools/list exposes the 283 Classic tools plus the 22 Fusion tools", () => {
+  const { tools } = listAllTools();
   const names = new Set(tools.map((t) => t.name));
 
-  assert.ok(modules.includes("fusion-cases"), "fusion-cases is imported by src/index.ts");
-  assert.ok(modules.includes("fusion-detections"), "fusion-detections is imported by src/index.ts");
   assert.equal(tools.length, 305);
   assert.equal(names.size, 305, "tool names are unique");
 
@@ -116,15 +79,10 @@ test("tools/list exposes the 283 Classic tools plus the 22 Fusion tools", async 
   for (const name of CLASSIC_DETECTION_TOOLS) assert.ok(names.has(name), `${name} still registered`);
   for (const name of FUSION_CASE_TOOLS) assert.ok(names.has(name), `${name} registered`);
   for (const name of FUSION_DETECTION_TOOLS) assert.ok(names.has(name), `${name} registered`);
-
-  const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
-  for (const tool of manifest.tools) {
-    assert.ok(names.has(tool.name), `manifest tool ${tool.name} is registered`);
-  }
 });
 
-test("every Fusion case tool has a schema, annotations and dash-free prose", async () => {
-  const { tools } = await listAllTools();
+test("every Fusion case tool has a schema, annotations and dash-free prose", () => {
+  const { tools } = listAllTools();
   for (const tool of tools.filter((t) => t.name.startsWith("sophos_fusion_"))) {
     assert.equal(tool.inputSchema?.type, "object", `${tool.name} has an object input schema`);
     assert.ok(tool.inputSchema.properties, `${tool.name} declares properties`);
@@ -136,16 +94,32 @@ test("every Fusion case tool has a schema, annotations and dash-free prose", asy
   assert.equal(readOnly.length, 8, "eight Fusion tools are read-only");
 });
 
-test("a tool that writes a local file is not marked read-only", async () => {
-  const { tools } = await listAllTools();
+test("the firewall backup download writes no local file, so it is read-only and takes no output_path", () => {
+  const { tools } = listAllTools();
   const download = tools.find((t) => t.name === "sophos_download_firewall_backup");
-  assert.equal(download.annotations.readOnlyHint, false, "it writes output_path");
-  assert.equal(download.annotations.destructiveHint, true, "it replaces any file already at output_path");
+  assert.equal(download.annotations.readOnlyHint, true, "it only returns a download link");
+  assert.equal(download.annotations.destructiveHint, false);
+  assert.equal(download.inputSchema.properties.output_path, undefined, "no filesystem on a Worker");
+  const imp = tools.find((t) => t.name === "sophos_import_firewall_config");
+  assert.equal(imp.inputSchema.properties.file_path, undefined, "no filesystem on a Worker");
 });
 
-test("Classic case and detection tools name the migration refusal and the Fusion tool to use", async () => {
-  const { tools } = await listAllTools();
-  const byName = new Map(tools.map((t) => [t.name, t]));
+test("the read-only listing excludes every tool not annotated readOnlyHint: true", () => {
+  const { registry, tools } = listAllTools();
+  const readOnlyList = registry.list(false);
+  const listed = new Set(readOnlyList.map((t: Tool) => t.name));
+  const writes = tools.filter((t) => t.annotations?.readOnlyHint !== true);
+  assert.ok(writes.length > 0, "there are write tools");
+  assert.ok(readOnlyList.length > 0, "there are read-only tools");
+  assert.equal(readOnlyList.length + writes.length, tools.length);
+  for (const tool of writes) assert.ok(!listed.has(tool.name), `${tool.name} is hidden when writes are off`);
+  for (const tool of readOnlyList) assert.equal(tool.annotations?.readOnlyHint, true, `${tool.name} is read-only`);
+  for (const tool of tools) assert.equal(registry.isWrite(tool.name), tool.annotations?.readOnlyHint !== true, tool.name);
+});
+
+test("Classic case and detection tools name the migration refusal and the Fusion tool to use", () => {
+  const { tools } = listAllTools();
+  const byName = new Map<string, Tool>(tools.map((t) => [t.name, t]));
   for (const name of [...CLASSIC_CASE_TOOLS, ...CLASSIC_DETECTION_TOOLS]) {
     const tool = byName.get(name);
     assert.match(tool.description, /Refused for a tenant that has migrated to Sophos Fusion/, name);
@@ -155,10 +129,10 @@ test("Classic case and detection tools name the migration refusal and the Fusion
   }
 });
 
-test("the write tools carry the measured warnings and the guards in their schemas", async () => {
-  const { tools } = await listAllTools();
-  const byName = new Map(tools.map((t) => [t.name, t]));
-  const expect = (name, pattern) => assert.match(byName.get(name).description, pattern, `${name}: ${pattern}`);
+test("the write tools carry the measured warnings and the guards in their schemas", () => {
+  const { tools } = listAllTools();
+  const byName = new Map<string, Tool>(tools.map((t) => [t.name, t]));
+  const expect = (name: string, pattern: RegExp) => assert.match(byName.get(name).description, pattern, `${name}: ${pattern}`);
 
   // managed_by: required, no default, irreversible, unclaimed if omitted, pinned by type
   const create = byName.get("sophos_fusion_create_case");
@@ -207,10 +181,10 @@ test("the write tools carry the measured warnings and the guards in their schema
   expect("sophos_fusion_search_detections", /0 to 1 float/);
 });
 
-test("the policy write tools explain assignment kinds, the endpoint group companion and the listing lag", async () => {
-  const { tools } = await listAllTools();
-  const byName = new Map(tools.map((t) => [t.name, t]));
-  const expect = (name, pattern) => assert.match(byName.get(name).description, pattern, `${name}: ${pattern}`);
+test("the policy write tools explain assignment kinds, the endpoint group companion and the listing lag", () => {
+  const { tools } = listAllTools();
+  const byName = new Map<string, Tool>(tools.map((t) => [t.name, t]));
+  const expect = (name: string, pattern: RegExp) => assert.match(byName.get(name).description, pattern, `${name}: ${pattern}`);
   for (const name of ["sophos_create_policy", "sophos_update_policy", "sophos_set_policy_assignments"]) {
     const tool = byName.get(name);
     for (const key of ["users", "user_groups", "endpoints", "endpoint_groups"]) {

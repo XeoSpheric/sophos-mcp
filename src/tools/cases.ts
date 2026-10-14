@@ -5,25 +5,25 @@
  * Interact with the Sophos Cases API /cases/v1/cases
  */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SophosClient } from "../client/sophos-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import type { SophosClient } from "../client/sophos-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
 import type {
   SophosCase,
   SophosCasePage,
   SophosCaseDetection,
   SophosCaseDetectionPage,
   SophosCaseMitreSummary,
-} from "../types/sophos.js";
-import type { FusionMigrationGuard } from "../fusion/migration.js";
-import { jsonResult, withErrorHandling, withWarnings } from "./helpers.js";
+} from "../types/sophos.ts";
+import type { FusionMigrationGuard } from "../fusion/migration.ts";
+import { jsonResult, withErrorHandling, withWarnings } from "./helpers.ts";
 
 // Cases API max page size is 50
 const CASES_MAX_PAGE_SIZE = 50;
 
 export function registerCaseTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: SophosClient,
   tenantResolver: TenantResolver,
   migration: FusionMigrationGuard

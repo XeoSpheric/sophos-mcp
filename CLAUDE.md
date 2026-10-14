@@ -5,53 +5,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-npm run build       # Compile TypeScript to dist/
-npm start           # Run the compiled server
-npm run dev         # Watch mode (tsc --watch)
-npm test            # Build, then run the node:test suites in test/ (no network)
-npm run build:mcpb  # Build the Claude Desktop extension bundle into release/
-node scripts/fusion-smoke.mjs [tenant-id]   # Live check of the Fusion tools and the Classic gate (needs credentials); read-only unless --write, --write-classic or --all
+npm run typecheck   # tsc-rs (Rust port of the TypeScript compiler), strict, no emit
+npm test            # node:test runs the .ts sources directly (no network; fetch is stubbed)
+npm run build       # wrangler deploy --dry-run into dist-dry-run/ (bundle check)
+npm run dev         # local workerd via wrangler dev; copy .dev.vars.example to .dev.vars
+npm run deploy      # wrangler deploy
+MCP_URL=... MCP_AUTH_TOKEN=... node scripts/fusion-smoke.mjs [tenant-id]   # Live check over MCP HTTP against a running Worker (default http://localhost:8787/mcp); read-only unless --write, --write-classic or --all (those need ALLOW_WRITES=true)
 ```
 
-`npm test` and TypeScript compilation (`npm run build`) are the verification steps. Fix all type errors and keep the tests green before considering a change complete. The tests stub `fetch`; nothing in them reaches Sophos.
+`npm run typecheck`, `npm test` and `npm run build` are the verification steps. Fix all type errors and keep the tests green before considering a change complete. The tests stub `fetch`; nothing in them reaches Sophos.
 
-Run the server locally:
-```bash
-cp .env.example .env   # Then fill in credentials
-npm run build && npm start
-```
-
-## MCPB packaging
-
-`manifest.json` at the repo root is the [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) manifest. `scripts/build-mcpb.mjs` (run via `npm run build:mcpb`) rewrites its `version` from `package.json` and its `tools` array from every `registerTool` call in `src/tools/`, validates it, stages `dist/` plus production dependencies in `build/mcpb/`, and packs `release/sophos-central-mcp-server-<version>.mcpb`. Do not hand-edit `version` or `tools` in the manifest; edit the other fields (description, `user_config`, compatibility) directly and re-run the build. New tools must follow the `registerTool("name", { title: "...", description: `...` ...` shape or the build fails on purpose.
-
-Credentials come from `user_config` (`sophos_client_id`, `sophos_client_secret`, both `sensitive`) mapped to `SOPHOS_CLIENT_ID` / `SOPHOS_CLIENT_SECRET` in `server.mcp_config.env`, with `TRANSPORT=stdio` fixed.
+Dependency-free TypeScript Cloudflare Worker, modelled on `~/autotask-mcp` and `~/datto-rmm-mcp` (see `CONTRIBUTING.md`). No runtime dependencies; dev dependencies are `tsc-rs` and `wrangler` only. Node 24+ for the tests (native type stripping). There is no stdio transport, no npm package and no `.mcpb` bundle any more.
 
 ## Naming
 
-The product is Sophos Fusion (formerly Sophos Central). Human-facing titles and descriptions say "Sophos Fusion (formerly Sophos Central)". The npm package, the `.mcpb` manifest `name`, the `bin` entries and the `McpServer` name string stay `sophos-central-mcp-server` so existing installs update in place. Never write "Sophos Taegis": `api.taegis.sophos.com` is a hostname, and the product it came from is Secureworks Taegis. Use the developer portal's wording for the query language: "Fusion Query Language (QL)".
+The product is Sophos Fusion (formerly Sophos Central). Human-facing titles and descriptions say "Sophos Fusion (formerly Sophos Central)". The `package.json` name and the MCP `serverInfo` name stay `sophos-central-mcp-server` so clients keyed on the server name keep working; the Worker is `sophos-mcp` in `wrangler.json`. Never write "Sophos Taegis": `api.taegis.sophos.com` is a hostname, and the product it came from is Secureworks Taegis. Use the developer portal's wording for the query language: "Fusion Query Language (QL)".
 
 ## Architecture
 
-This is a **Model Context Protocol (MCP) server** that wraps the Sophos Central REST APIs and the Sophos Fusion GraphQL APIs, built with `@modelcontextprotocol/sdk`, Express (HTTP transport), and Zod (schema validation). TypeScript ESM (`"type": "module"`, `Node16` module resolution): all imports must use `.js` extensions.
+A **Model Context Protocol (MCP) server** on Cloudflare Workers that wraps the Sophos Central REST APIs and the Sophos Fusion GraphQL APIs. Erasable TypeScript only (`erasableSyntaxOnly`: no enums, namespaces or constructor parameter properties) so Node runs the sources unbundled; relative imports carry their `.ts` extension. No `@types/node`: the tests use the Node slice in `test/node.d.ts`, and `src/` uses only Web APIs (fetch, WebCrypto, TextEncoder, atob/btoa). No filesystem.
 
-### Startup flow (`src/index.ts`)
+### Request flow
 
-1. Load config from env vars (`src/config/config.ts`)
-2. `TokenManager` fetches an OAuth2 token from `https://id.sophos.com/api/v2/oauth2/token`
-3. `TenantResolver.init()` calls `/whoami/v1` to discover caller identity type: `partner | organization | tenant`
-4. For partner/org callers, `loadTenants()` paginates through all managed tenants and caches `tenantId → apiHost`
-5. `SophosClient` (REST) and `FusionClient` (GraphQL) are created on the same `TokenManager`
-6. Tools are registered conditionally: `sophos_list_tenants` only for partner/org; all others always. The Classic case and detection tools take a `FusionMigrationGuard` built on the case reference cache. The Fusion block (cases, then detections) is registered last
-7. Transport starts: streamable HTTP on `MCP_HTTP_HOST:PORT/mcp` (default `127.0.0.1:3100`; stateless, new `McpServer` and transport per request, behind `src/http-guard.ts`, which refuses a browser `Origin` that is not loopback or in `MCP_ALLOWED_ORIGINS`, and requires `Authorization: Bearer` on `/mcp` when `MCP_HTTP_TOKEN` is set; a non-loopback bind with no token prints a warning) or stdio. The `Host` header is not checked, so clients on other machines can connect
+1. `src/worker.ts` (entry; only `export default`, because workerd treats every named export as an entrypoint): OPTIONS is the CORS preflight, `GET /health` is open, everything else but `/mcp` is 404
+2. `configFromEnv(env)` (`src/config/config.ts`) reads vars and secrets and sets the module settings (`CHARACTER_LIMIT`, `SOPHOS_FUSION_GRAPHQL_URL`, `CLASSIC_MIGRATION_CHECK`, ESM live bindings). A bad `SOPHOS_FUSION_GRAPHQL_URL` is a 500 before any request to Sophos
+3. Access control on `/mcp`: `MCP_AUTH_TOKEN` (bearer) and/or `CONDUIT_S2S_SECRET` (`X-Gateway-S2S` HMAC). In env mode at least one must be set or `/mcp` answers 503, because a workers.dev URL is public and the secrets are the operator's Sophos credentials
+4. Credentials: `AUTH_MODE=gateway` takes `X-Sophos-Client-Id` / `X-Sophos-Client-Secret` per request (missing is a 401, never a fall back to the secrets); otherwise the `SOPHOS_CLIENT_ID` / `SOPHOS_CLIENT_SECRET` secrets
+5. `src/mcp.ts` handles both protocol eras (2025 JSON-RPC with `initialize`, SSE single-shot replies; 2026-07-28 with `server/discover`) and dispatches `tools/list` and `tools/call` to a per-request `Session` (`src/session.ts`)
+6. The Session builds the clients on the credential's shared state, resolves the caller identity (`/whoami/v1`, cached per credential), then registers every tool on a fresh `ToolRegistry`. `sophos_list_tenants`, the partner tools and the bulk health tools are registered unless the caller is known to be a single tenant. Without credentials, or when whoami fails, every tool is listed and every call returns the reason
+7. `ALLOW_WRITES` (default off; Worker Previews always off): tools not annotated `readOnlyHint: true` are left out of tools/list and refused on call
+
+### Workers rules
+
+- **Never let one request await a promise another request created.** Module-level state is plain data only: `SharedState` per credential (keyed on a hash of id and secret) holds the token (`TokenStore`), identity and tenant map (`TenancyStore`, list reloaded after 15 minutes) and the Fusion case reference data map. `TokenManager`, `TenantResolver`, `CaseReferenceDataCache` and the clients are built per request, so their in-flight promises are request scoped.
+- Per request cost is about 1.3 ms CPU to register the 305 tools; that is fine, do not cache the registry across requests (it closes over request-scoped clients).
+- Bulk tools (`sophos_list_account_health`, `sophos_partner_gap_analysis`) fan out one subrequest per tenant; that needs the paid Workers plan's subrequest limit for large partners.
 
 ### Core classes
 
-- **`TokenManager`** (`src/auth/token-manager.ts`): OAuth2 client credentials flow with in-memory token caching (60s early refresh, deduplicates concurrent refresh calls). Shared by both clients.
-- **`TenantResolver`** (`src/client/tenant-resolver.ts`): Holds caller identity and `tenantId → TenantInfo` map. Key methods: `resolveTenantId(providedId?)`, which enforces that partner/org callers must supply a tenant ID; `resolveApiHost(tenantId)`, which returns the per-tenant regional REST host. Fusion calls use `resolveTenantId` only; there is no regional host.
+- **`TokenManager`** (`src/auth/token-manager.ts`): OAuth2 client credentials flow; the token lives in the shared `TokenStore` (60s early refresh); concurrent refreshes within a request are deduplicated.
+- **`TenantResolver`** (`src/client/tenant-resolver.ts`): caller identity and `tenantId -> TenantInfo` map in the shared `TenancyStore`. Key methods: `init()`, `resolveTenantId(providedId?)`, which enforces that partner/org callers must supply a tenant ID; `resolveApiHost(tenantId)`, which returns the per-tenant regional REST host; `loadTenants()`; `isMultiTenant()` (true while the identity is unknown). Fusion calls use `resolveTenantId` only; there is no regional host.
 - **`SophosClient`** (`src/client/sophos-client.ts`): Two methods, `tenantRequest<T>(tenantId, path, opts)` and `globalRequest<T>(path, opts)`. Both first run `assertSafeApiPath`, which refuses a path where an interpolated ID carries a `.` or `..` segment (after percent-decoding), `?`, `#`, a backslash, an encoded `/` or a control character; query strings go in `params`, never the path. Both inject auth headers and run `executeWithRetry` (2 retries, exponential backoff, respects `Retry-After` on 429, no retry on 4xx). A POST is retried only on 429: after a 5xx, a timeout or a dropped connection it may already have taken effect, so the error says so instead.
 - **`FusionClient`** (`src/client/fusion-client.ts`): `query<T>(tenantId, document, variables)` POSTs to `SOPHOS_FUSION_GRAPHQL_URL` with the bearer token and `X-Tenant-ID`. Same transport retry shape as the REST client (30 s timeout, 2 retries, `Retry-After` on 429, no retry on 4xx, and a mutation retried only on 429) with full-jitter backoff, plus the one GraphQL-layer retry described below. Returns `{ data, warnings }`. `putPresigned(url, bytes, contentType)` is the plain PUT behind case file uploads.
 - **`FusionMigrationGuard`** (`src/fusion/migration.ts`): `assertClassic(tenantId, classicTool, useInstead)` throws when the tenant has moved to Fusion (the case reference cache returns at least one case type; an unmigrated tenant gets an empty list with no error) and returns warnings otherwise. Every Classic case and detection handler calls it first. `SOPHOS_CLASSIC_MIGRATION_CHECK=off` disables it.
+- **`ToolRegistry`** (`src/tools/registry.ts`): the `registerTool(name, { title, description, inputSchema, annotations }, handler)` surface the tool modules use; builds the tools/list payload, validates `tools/call` arguments against the shape (unknown keys dropped, defaults applied, `Invalid arguments for tool <name>: <path>: <message>` tool error) and applies the write gate.
+- **`src/schema.ts`**: a dependency-free, zod-shaped schema builder. Tool files `import * as z from "../schema.ts"` and write `z.string().uuid().optional().describe(...)`; it renders JSON Schema and validates with zod 3 semantics (no coercion except `z.coerce.number()`, chain-ordered `.trim()` / `.toLowerCase()`). Supported: `string` (uuid, email, url, regex, startsWith, datetime, min, max, trim, toLowerCase), `number` (int, min, max), `coerce.number`, `boolean`, `enum`, `literal`, `union`, `array` (min, max), `object`, `record`, `unknown`, and `optional`, `default`, `describe` on all; `z.infer`. Add a method there before using a new zod feature.
 
 ### The GraphQL 200 rule
 
@@ -81,12 +79,12 @@ Measured case rules the tools enforce or explain (live tenant, 22/09/2026): `man
 
 ### Tool registration pattern
 
-Each file in `src/tools/` exports a `register*Tools(server, client, tenantResolver)` function (`cases.ts` and `detections.ts` take the migration guard as a fourth parameter; `fusion-cases.ts` takes `(server, fusionClient, tenantResolver, caseReferenceData)`; `fusion-detections.ts` takes `(server, fusionClient, tenantResolver)`). Tools follow this pattern:
+Each file in `src/tools/` exports a `register*Tools(server: ToolRegistry, client, tenantResolver)` function (`cases.ts` and `detections.ts` take the migration guard as a fourth parameter; `fusion-cases.ts` takes `(server, fusionClient, tenantResolver, caseReferenceData)`; `fusion-detections.ts` takes `(server, fusionClient, tenantResolver)`). `registerAllTools` in `src/session.ts` calls them all. Tools follow this pattern:
 
 ```typescript
 server.registerTool(
   "sophos_tool_name",
-  { title, description, inputSchema: { /* Zod fields */ }, annotations: { readOnlyHint, destructiveHint, ... } },
+  { title, description, inputSchema: { /* z fields from ../schema.ts */ }, annotations: { readOnlyHint, destructiveHint, ... } },
   withErrorHandling(async (args) => {
     const tenantId = tenantResolver.resolveTenantId(args.tenant_id);
     const data = await client.tenantRequest<ResponseType>(tenantId, "/api/path", { params, method, body });
@@ -95,20 +93,24 @@ server.registerTool(
 );
 ```
 
+Every tool must set `annotations`; `readOnlyHint: true` is what keeps it available with `ALLOW_WRITES` off. Tools cannot touch a filesystem: take content as text or base64 and return links, not paths (`sophos_download_firewall_backup` returns the pre-signed `download_url`; `sophos_import_firewall_config` takes `source_url` or `content_base64`; `sophos_fusion_upload_case_file` takes `content` or `content_base64`).
+
 Helper functions in `src/tools/helpers.ts`:
 - `jsonResult(data)`: JSON-serialises and truncates at `CHARACTER_LIMIT` with a truncation notice
 - `errorResult(error)`: formats errors as MCP error responses
 - `withErrorHandling(handler)`: wraps handlers to catch and return errors cleanly
+
+Byte helpers (`utf8Bytes`, `base64ToBytes`, `bytesToBase64`, `md5Hex`, `sleep`, `sha256Hex`) live in `src/util.ts`; there is no `Buffer`.
 
 ### Adding a new tool
 
 1. Create (or add to) a file in `src/tools/`
 2. Add Sophos API response types to `src/types/sophos.ts` (REST) or `src/fusion/types.ts` (GraphQL) if needed
 3. Export a `register*Tools(...)` function
-4. Import and call it in `src/index.ts`
+4. Call it from `registerAllTools` in `src/session.ts`
 5. All tenant-scoped tools must call `tenantResolver.resolveTenantId(args.tenant_id)` first; this throws with a useful message for partner/org callers who omit `tenant_id`
 6. Fusion tools take the `sophos_fusion_` prefix, name the severity scale a field uses, give one working QL example where a query is accepted, and batch ID lookups (the rate limit is per credential and shared with the Central tools)
-7. Update the count in `test/tool-registration.test.mjs` and run `npm test`
+7. Update the counts in `test/tool-registration.test.ts` and `test/worker.test.ts`, then run `npm run typecheck && npm test && npm run build`
 
 ### Pagination
 
@@ -123,9 +125,13 @@ Helper functions in `src/tools/helpers.ts`:
 |---|---|
 | `SOPHOS_AUTH_URL` | `https://id.sophos.com/api/v2/oauth2/token` |
 | `SOPHOS_GLOBAL_API` | `https://api.central.sophos.com` |
-| `SOPHOS_FUSION_GRAPHQL_URL` | `https://api.taegis.sophos.com/graphql`, env override of the same name (https on a `sophos.com` host only, checked in `loadConfig`) |
+| `SOPHOS_FUSION_GRAPHQL_URL` | `https://api.taegis.sophos.com/graphql`, env override of the same name (https on a `sophos.com` host only, checked in `configFromEnv`) |
 | `CHARACTER_LIMIT` | `50000` (env override, minimum 10000) |
 | `DEFAULT_PAGE_SIZE` | `50` |
+
+### Worker vars and secrets
+
+Secrets: `SOPHOS_CLIENT_ID`, `SOPHOS_CLIENT_SECRET`, `MCP_AUTH_TOKEN`, `CONDUIT_S2S_SECRET`. Vars (`wrangler.json`): `AUTH_MODE` (`env` or `gateway`), `ALLOW_WRITES`, `LOG_LEVEL`, `LOG_FORMAT`, and optionally `CHARACTER_LIMIT`, `SOPHOS_FUSION_GRAPHQL_URL`, `SOPHOS_CLASSIC_MIGRATION_CHECK`, `MCP_SERVER_NAME`, `MCP_SERVER_VERSION`. `previews.vars` force gateway mode and no writes.
 
 ## Prose
 

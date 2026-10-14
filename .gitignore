@@ -1,9 +1,17 @@
+# Dependencies / Workers build output
 node_modules/
-dist/
-.env
-*.tgz
+.wrangler/
+dist-dry-run/
 
-# MCPB bundle build output (npm run build:mcpb)
-build/
-release/
-*.mcpb
+# Local secrets (wrangler dev reads .dev.vars)
+.dev.vars
+.env
+.env.*
+
+# Editors / OS
+.vscode/
+.idea/
+*.sw?
+.DS_Store
+*.log
+.claude/

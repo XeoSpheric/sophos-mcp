@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sophos-mcp",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-02-01",
+  // Workers Logs. Kept here so `wrangler deploy` (CI) doesn't reset dashboard settings.
+  "observability": {
+    "logs": { "enabled": true, "invocation_logs": true }
+  },
+  // Non-secret configuration. Credentials and access control go in secrets:
+  //   wrangler secret put SOPHOS_CLIENT_ID
+  //   wrangler secret put SOPHOS_CLIENT_SECRET
+  //   wrangler secret put MCP_AUTH_TOKEN        (or CONDUIT_S2S_SECRET)
+  // Optional vars: CHARACTER_LIMIT, SOPHOS_FUSION_GRAPHQL_URL,
+  // SOPHOS_CLASSIC_MIGRATION_CHECK=off.
+  "vars": {
+    "AUTH_MODE": "env",
+    "ALLOW_WRITES": "false",
+    "LOG_LEVEL": "info",
+    "LOG_FORMAT": "json"
+  },
+  // Worker Previews get public URLs, so they run in gateway mode (callers send
+  // their own Sophos credentials as headers) and never write.
+  "previews": {
+    "vars": {
+      "AUTH_MODE": "gateway",
+      "ALLOW_WRITES": "false",
+      "LOG_LEVEL": "debug",
+      "LOG_FORMAT": "json"
+    }
+  }
+}

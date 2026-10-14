@@ -5,15 +5,15 @@
  * runtime and the cache is refreshed on a TTL rather than resolved once.
  */
 
-import type { FusionClient } from "../client/fusion-client.js";
-import { CASE_REFERENCE_DATA } from "./queries/cases.js";
-import { isUuid } from "./format.js";
+import type { FusionClient } from "../client/fusion-client.ts";
+import { CASE_REFERENCE_DATA } from "./queries/cases.ts";
+import { isUuid } from "./format.ts";
 import type {
   FusionCasePrimaryStatus,
   FusionCaseReferenceDataResponse,
   FusionCaseType,
   FusionReferenceItem,
-} from "./types.js";
+} from "./types.ts";
 
 export interface CaseReferenceData {
   types: FusionCaseType[];
@@ -24,14 +24,24 @@ export interface CaseReferenceData {
 
 const DEFAULT_TTL_MS = 15 * 60_000;
 
+export type CaseReferenceDataStore = Map<string, { data: CaseReferenceData; expiresAt: number }>;
+
+/**
+ * The cache map is plain data shared by every request in the isolate that
+ * uses the same credentials; the in-flight map is per instance, and an
+ * instance is per request, so no request awaits another request's promise.
+ */
 export class CaseReferenceDataCache {
-  private cache = new Map<string, { data: CaseReferenceData; expiresAt: number }>();
+  private client: FusionClient;
+  private ttlMs: number;
+  private cache: CaseReferenceDataStore;
   private inflight = new Map<string, Promise<CaseReferenceData>>();
 
-  constructor(
-    private client: FusionClient,
-    private ttlMs: number = DEFAULT_TTL_MS
-  ) {}
+  constructor(client: FusionClient, ttlMs: number = DEFAULT_TTL_MS, cache: CaseReferenceDataStore = new Map()) {
+    this.client = client;
+    this.ttlMs = ttlMs;
+    this.cache = cache;
+  }
 
   async get(tenantId: string, options: { refresh?: boolean } = {}): Promise<CaseReferenceData> {
     const cached = this.cache.get(tenantId);

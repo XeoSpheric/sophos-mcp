@@ -19,11 +19,12 @@ import {
   parseMentionTokens,
   qlString,
   timestampToIso,
-} from "../dist/fusion/format.js";
-import { buildCasesQl } from "../dist/fusion/cases-ql.js";
-import { CaseReferenceDataCache, matchReference } from "../dist/fusion/case-reference-data.js";
-import { FusionMigrationGuard, UPGRADE_CENTRE_URL } from "../dist/fusion/migration.js";
-import { buildMitreSummary } from "../dist/tools/fusion-cases.js";
+} from "../src/fusion/format.ts";
+import { buildCasesQl } from "../src/fusion/cases-ql.ts";
+import { CaseReferenceDataCache, matchReference } from "../src/fusion/case-reference-data.ts";
+import { FusionMigrationGuard, UPGRADE_CENTRE_URL } from "../src/fusion/migration.ts";
+import { buildMitreSummary } from "../src/tools/fusion-cases.ts";
+import type { FusionClient } from "../src/client/fusion-client.ts";
 
 const TYPE_ID = "11111111-1111-4111-8111-111111111111";
 const NEW_ID = "22222222-2222-4222-8222-222222222222";
@@ -109,13 +110,13 @@ test("mergeTags unions without duplicates and keeps order", () => {
 
 test("formatDetection reads the 0 to 1 severity from metadata and converts the timestamps", () => {
   const row = formatDetection(
-    {
+    ({
       id: "alert://priv:event-filter:1:2:3",
       status: "OPEN",
       metadata: { title: "T", severity: 0.4, created_at: { seconds: 1700000000, nanos: 0 } },
       source_entities: [{ display_name: "host-1", subtype: "host", identifiers: ["h1"] }],
       event_ids: [{ id: "e1" }, { id: "e2" }],
-    },
+    } as any),
     { createdAt: "2026-09-22T00:00:00Z", isGenesis: true }
   );
   assert.equal(row.severity_0_to_1, 0.4);
@@ -209,19 +210,19 @@ const referenceBody = {
   },
 };
 
-function fakeClient(body = referenceBody, warnings = []) {
-  const calls = [];
-  return {
-    calls,
-    query: async (tenantId, document, variables) => {
+function fakeClient(body: unknown = referenceBody, warnings: string[] = []) {
+  const calls: Array<{ tenantId: string; document: string; variables: unknown }> = [];
+  const client = {
+    query: async (tenantId: string, document: string, variables: unknown) => {
       calls.push({ tenantId, document, variables });
       return { data: structuredClone(body), warnings };
     },
-  };
+  } as unknown as FusionClient;
+  return { calls, client };
 }
 
 test("reference cache resolves names, titles and UUIDs", async () => {
-  const client = fakeClient();
+  const { client, calls } = fakeClient();
   const cache = new CaseReferenceDataCache(client);
   assert.equal(await cache.resolveTypeId("t1", "investigation"), TYPE_ID);
   assert.equal(await cache.resolveTypeId("t1", "Investigation"), TYPE_ID);
@@ -230,11 +231,11 @@ test("reference cache resolves names, titles and UUIDs", async () => {
   assert.equal(await cache.resolveVerdictId("t1", "True positive"), VERDICT_ID);
   const closed = await cache.resolveStatus("t1", "CLOSED");
   assert.equal(closed.isClosed, true);
-  assert.equal(client.calls.length, 1, "one fetch serves every lookup for the tenant");
+  assert.equal(calls.length, 1, "one fetch serves every lookup for the tenant");
 });
 
 test("reference cache names the options when a value is unknown", async () => {
-  const cache = new CaseReferenceDataCache(fakeClient());
+  const cache = new CaseReferenceDataCache(fakeClient().client);
   await assert.rejects(
     () => cache.resolveStatusId("t1", "on hold"),
     /Unknown primary status "on hold" for this tenant\. Available: NEW, CLOSED/
@@ -242,32 +243,32 @@ test("reference cache names the options when a value is unknown", async () => {
 });
 
 test("reference cache is per tenant, honours refresh and expires on the TTL", async () => {
-  const client = fakeClient();
+  const { client, calls } = fakeClient();
   const cache = new CaseReferenceDataCache(client, 20);
   await cache.get("t1");
   await cache.get("t1");
-  assert.equal(client.calls.length, 1);
+  assert.equal(calls.length, 1);
   await cache.get("t2");
-  assert.equal(client.calls.length, 2);
+  assert.equal(calls.length, 2);
   await cache.get("t1", { refresh: true });
-  assert.equal(client.calls.length, 3);
+  assert.equal(calls.length, 3);
   await new Promise((resolve) => setTimeout(resolve, 30));
   await cache.get("t1");
-  assert.equal(client.calls.length, 4);
+  assert.equal(calls.length, 4);
   cache.invalidate("t2");
   await cache.get("t2");
-  assert.equal(client.calls.length, 5);
+  assert.equal(calls.length, 5);
 });
 
 test("reference cache deduplicates concurrent fetches", async () => {
-  const client = fakeClient();
+  const { client, calls } = fakeClient();
   const cache = new CaseReferenceDataCache(client);
   await Promise.all([cache.get("t1"), cache.get("t1"), cache.resolveTypeId("t1", "investigation")]);
-  assert.equal(client.calls.length, 1);
+  assert.equal(calls.length, 1);
 });
 
 test("reference cache refuses a partial response with a missing list", async () => {
-  const client = fakeClient({ ...referenceBody, casePrimaryVerdicts: null }, ["verdicts subgraph down"]);
+  const { client } = fakeClient({ ...referenceBody, casePrimaryVerdicts: null }, ["verdicts subgraph down"]);
   const cache = new CaseReferenceDataCache(client);
   await assert.rejects(
     () => cache.get("t1"),
@@ -285,7 +286,7 @@ test("matchReference prefers name over title", () => {
 
 // --- migration.ts ---
 
-function fakeReferenceData(types, { throws } = {}) {
+function fakeReferenceData(types: Array<{ id: string; name: string }>, { throws }: { throws?: string } = {}) {
   let calls = 0;
   return {
     get calls() {
@@ -296,7 +297,7 @@ function fakeReferenceData(types, { throws } = {}) {
       if (throws) throw new Error(throws);
       return { types, primaryStatuses: [], primaryVerdicts: [], fetchedAt: "" };
     },
-  };
+  } as any;
 }
 
 test("migration guard refuses a migrated tenant and names the Fusion tool", async () => {
@@ -306,7 +307,7 @@ test("migration guard refuses a migrated tenant and names the Fusion tool", asyn
   assert.deepEqual(status.caseTypes, ["investigation"]);
   await assert.rejects(
     () => guard.assertClassic("t1", "sophos_list_cases", "sophos_fusion_list_cases"),
-    (error) => {
+    (error: any) => {
       assert.match(error.message, /Tenant t1 has migrated to Sophos Fusion/);
       assert.match(error.message, /sophos_list_cases calls the Classic Sophos Central API/);
       assert.match(error.message, /Use sophos_fusion_list_cases/);
@@ -374,7 +375,7 @@ test("buildMitreSummary groups techniques under tactics with detection counts", 
       ],
     },
   ];
-  const summary = buildMitreSummary(records);
+  const summary = buildMitreSummary(records as any);
   assert.equal(summary.detection_count, 2);
   assert.equal(summary.technique_count, 2);
   assert.deepEqual(
@@ -382,7 +383,7 @@ test("buildMitreSummary groups techniques under tactics with detection counts", 
     ["Defense Evasion", "Execution"]
   );
   const execution = summary.tactics.find((t) => t.tactic === "Execution");
-  assert.deepEqual(execution.techniques, [
+  assert.deepEqual(execution?.techniques, [
     { technique_id: "T1059.001", technique: "PowerShell", detection_count: 2 },
   ]);
   assert.deepEqual(summary.techniques_without_tactic, [

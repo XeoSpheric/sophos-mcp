@@ -21,15 +21,13 @@
  * lifecycle rules was measured on a live tenant on 22/09/2026.
  */
 
-import { readFile } from "node:fs/promises";
-import { basename, extname } from "node:path";
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { FusionGraphQLError, type FusionClient } from "../client/fusion-client.js";
-import type { TenantResolver } from "../client/tenant-resolver.js";
-import type { CaseReferenceDataCache } from "../fusion/case-reference-data.js";
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "../config/config.js";
-import { buildCasesQl } from "../fusion/cases-ql.js";
+import * as z from "../schema.ts";
+import type { ToolRegistry } from "./registry.ts";
+import { FusionGraphQLError, type FusionClient } from "../client/fusion-client.ts";
+import type { TenantResolver } from "../client/tenant-resolver.ts";
+import type { CaseReferenceDataCache } from "../fusion/case-reference-data.ts";
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "../config/config.ts";
+import { buildCasesQl } from "../fusion/cases-ql.ts";
 import {
   CASE_SEVERITY_NAMES,
   RESOURCE_NAME_EXAMPLE,
@@ -44,7 +42,7 @@ import {
   normaliseCaseSeverity,
   parseMentionTokens,
   qlString,
-} from "../fusion/format.js";
+} from "../fusion/format.ts";
 import {
   ADD_CASE_COMMENT,
   ADD_EVIDENCE_TO_CASE,
@@ -68,8 +66,8 @@ import {
   UPDATE_CASE,
   UPDATE_CASE_COMMENT,
   UPDATE_CASE_LINK,
-} from "../fusion/queries/cases.js";
-import { DETECTIONS_BY_ID } from "../fusion/queries/detections.js";
+} from "../fusion/queries/cases.ts";
+import { DETECTIONS_BY_ID } from "../fusion/queries/detections.ts";
 import type {
   FusionAddCaseCommentResponse,
   FusionAddEvidenceResponse,
@@ -100,8 +98,9 @@ import type {
   FusionUpdateCaseCommentResponse,
   FusionUpdateCaseLinkResponse,
   FusionUpdateCaseResponse,
-} from "../fusion/types.js";
-import { jsonResult, withErrorHandling, withWarnings } from "./helpers.js";
+} from "../fusion/types.ts";
+import { jsonResult, withErrorHandling, withWarnings } from "./helpers.ts";
+import { base64ToBytes, utf8Bytes } from "../util.ts";
 
 const ID_NOTE =
   "Fusion case UUID or short ID (e.g. 'CSE00001'). Classic IDs like '1-598868' do not resolve here.";
@@ -153,7 +152,7 @@ const DESTRUCTIVE = {
 } as const;
 
 export function registerFusionCaseTools(
-  server: McpServer,
+  server: ToolRegistry,
   client: FusionClient,
   tenantResolver: TenantResolver,
   referenceData: CaseReferenceDataCache
@@ -1443,15 +1442,14 @@ Returns:
       title: "Upload Fusion Case File",
       description: `Attach a file to a Sophos Fusion case: registers the upload, PUTs the bytes to the presigned URL the API returns, then polls until the file status leaves SCHEDULED (it reached UPLOADED within about 3 seconds in testing).
 
-Supply exactly one of content (text, stored as UTF-8), content_base64 (binary) or file_path (a file on the machine running this MCP server). name is required unless file_path is given. content_type defaults from the file extension. Files are limited to 50 MB. Deleting a file later is a soft delete.
+Supply exactly one of content (text, stored as UTF-8) or content_base64 (binary). content_type defaults from the file extension. Files are limited to 50 MB. Deleting a file later is a soft delete.
 
 Args:
   - case_id (string): ${ID_NOTE}
   - tenant_id (string, optional): Tenant ID. Required for partner/org callers.
-  - name (string, optional): File name as it should appear on the case.
+  - name (string): File name as it should appear on the case.
   - content (string, optional): Text content.
   - content_base64 (string, optional): Binary content, base64.
-  - file_path (string, optional): Local path to read.
   - content_type (string, optional): MIME type; guessed from the name when omitted.
   - embedded (boolean, optional, default false): Mark the file as embedded content (for images used in key findings).
 
@@ -1460,10 +1458,9 @@ Returns:
       inputSchema: {
         case_id: z.string().describe(ID_NOTE),
         tenant_id: tenantIdField,
-        name: z.string().min(1).optional().describe("File name on the case"),
+        name: z.string().min(1).describe("File name on the case"),
         content: z.string().optional().describe("Text content (UTF-8)"),
         content_base64: z.string().optional().describe("Binary content, base64"),
-        file_path: z.string().optional().describe("Local file path on the MCP server host"),
         content_type: z.string().optional().describe("MIME type (guessed from the name when omitted)"),
         embedded: z.boolean().optional().default(false).describe("Embedded content (images in key findings)"),
       },
@@ -1471,24 +1468,20 @@ Returns:
     },
     withErrorHandling(async (args) => {
       const tenantId = tenantResolver.resolveTenantId(args.tenant_id);
-      const sources = [args.content, args.content_base64, args.file_path].filter((v) => v !== undefined).length;
-      if (sources !== 1) {
-        throw new Error("Supply exactly one of content, content_base64 or file_path.");
+      if ((args.content === undefined) === (args.content_base64 === undefined)) {
+        throw new Error("Supply exactly one of content or content_base64.");
       }
-      const name = args.name ?? (args.file_path ? basename(args.file_path) : undefined);
-      if (!name) {
-        throw new Error("name is required unless file_path is given.");
-      }
+      const name = args.name;
 
       let bytes: Uint8Array;
       if (args.content !== undefined) {
-        bytes = Buffer.from(args.content, "utf8");
-      } else if (args.content_base64 !== undefined) {
-        bytes = Buffer.from(args.content_base64, "base64");
+        bytes = utf8Bytes(args.content);
       } else {
-        bytes = await readFile(args.file_path!).catch((error: NodeJS.ErrnoException) => {
-          throw new Error(`Could not read ${args.file_path}: ${error.message}`);
-        });
+        try {
+          bytes = base64ToBytes(args.content_base64!);
+        } catch {
+          throw new Error("content_base64 is not valid base64.");
+        }
       }
       if (bytes.byteLength === 0) {
         throw new Error("The file is empty; nothing to upload.");
@@ -1963,7 +1956,9 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 function guessContentType(name: string): string {
-  return CONTENT_TYPES[extname(name).toLowerCase()] ?? "application/octet-stream";
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : "";
+  return CONTENT_TYPES[ext] ?? "application/octet-stream";
 }
 
 function isDeletedFile(f: FusionCaseFile): boolean {
