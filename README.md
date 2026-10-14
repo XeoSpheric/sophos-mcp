@@ -5,6 +5,13 @@
 > Sophos. It calls the public Sophos APIs using credentials you supply. Use it at your own
 > risk, and raise problems as issues on this repository rather than with Sophos support.
 
+> **Worker-only fork.** This is a fork of [Aaronjacobs000/sophos-mcp](https://github.com/Aaronjacobs000/sophos-mcp),
+> cut down to run only as a hosted Cloudflare Worker over MCP streamable HTTP. It is not a local
+> server for Claude Desktop or Claude Code: there is no stdio transport, no `.mcpb` extension, no
+> npm package (`npx`) and no prebuilt binaries. If you want a local install, use the
+> [upstream project](https://github.com/Aaronjacobs000/sophos-mcp). Any MCP client that speaks
+> streamable HTTP, Claude Code included, can still connect to a deployed Worker by URL.
+
 MCP (Model Context Protocol) server for the Sophos Fusion (formerly Sophos Central) APIs. Supports partner, organisation, and single-tenant credential types with automatic region routing. **305 tools** covering 22 Sophos API namespaces: the Sophos Central REST APIs plus the Sophos Fusion GraphQL APIs (`sophos_fusion_*`). It runs as a dependency-free TypeScript Cloudflare Worker that speaks MCP over streamable HTTP.
 
 The Worker is named `sophos-mcp` in `wrangler.json`. The MCP server name it reports stays `sophos-central-mcp-server`.
@@ -39,7 +46,7 @@ npm run deploy
 
 Make the token with something like `openssl rand -hex 32`. In the default `env` mode `/mcp` refuses every request (503) until `MCP_AUTH_TOKEN` or `CONDUIT_S2S_SECRET` is set. A `workers.dev` URL is public and the secrets are your own Sophos credentials, so there is no open mode.
 
-Connect a client to `https://sophos-mcp.<account>.workers.dev/mcp` and have it send `Authorization: Bearer <token>`. In Claude Code:
+Connect a client to `https://sophos-mcp.<account>.workers.dev/mcp` and have it send `Authorization: Bearer <token>`. This is a remote connection to the Worker; nothing runs on the client machine. For example, in Claude Code:
 
 ```bash
 claude mcp add --transport http sophos https://sophos-mcp.<account>.workers.dev/mcp --header "Authorization: Bearer <token>"
